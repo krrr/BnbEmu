@@ -78,6 +78,16 @@
 - 注意：**带下划线的 Kotlin 函数名无法注册发送包**（OpcodeManager 的 filteredName 会
   substringBefore('_') 截断），新 Packet 类名不能含下划线；handler 顶层 val 名可含下划线（精确匹配字段名）
 - **大厅聊天 C→S （op 18）**：参见ChatMsg.kt
+- **地图脚本炮台（金银岛等 30 张图，C→S op 133 / op 134）**：地图 `.bin` 尾部 `<mapscript>` 的
+  `<time ms><bomb x y power count state targetrow targetcol extendscope/></time>` 到点后，
+  **客户端**自己挑空格子（`sub_5364F3` 扫矩形/全图 + `sub_5345B3` 过滤 + 洗牌）发 op 133 上报；
+  服务端逐格广播 S→C op 139（**slot=8** = CGOBombSprinkler + **炮口像素 sourceX/Y** + 落点格），
+  2.5s 后照常用 op 138 引爆。⚠️ **op 100 的 meta[0] bit1 一位两用**：准备阶段叫「房主」(FLAG_CHIEF=0x2)，
+  **局内**叫「地图脚本控制权」（客户端 `sub_68848D` 就读它决定谁发 op 133）——
+  开局那一发必须给 0 号槽补回这一位（`SetPlayer.mapScriptController`，由 `StartGameReq` 按
+  `MapCatalog.of(mapId)?.hasMapScriptBombs` 传入），否则炮台全程哑火。
+  op 134 是炮台游戏对象自身的射击上报，字段布局未有抓包实证，解析严格校验、不符只消费不建泡。
+  详见 `docs/map-cannon-sprinkler.md`、`handler/battle/MapScriptBombReq.kt`、`packet/battle/MapScriptBomb.kt`。
 
 ## SSD 资料块编码（op1/op2/op51/op11/op13/op12 内嵌子块）
 - 结构：`Encode1Bool(true) + Encode4(len) + len 字节资料块`（op13/op12 无开头的 Encode1Bool）；
@@ -102,18 +112,19 @@
 2. 连 3838 → 收 banner → 客户端会话的首个连接发 op 0（22B）→ S 推送启动序列 **[193, 2 FirstInfoInit 1861B, 67, 1 MultiServerInit 54B, 51]**（seq 43/46/49/52/55）
 3. 登录连接：C 发 op 2（2B opcode + 40B 票据数据）→ S 回 **op 4**（65B）；
    紧跟 C 自动发 op 55 StringTableRevisionReq → S 推 **[11 ChannelsExtraInfo 218B, 13 ChannelsState 44B, 12 27B]**（频道列表）；
-   用户选频道后 C 发 op 11（4B 频道 hash）+ 297 + 39 → S 推 **[11, 13]**
+   用户选频道后 C 发 op 11 EnterChannelReq + 297 + 39 → S 推 **[11, 13]**
 4. 客户端取进频道连线地址：C 发 **op 6 ReqConnectToSvr**（E1(10)+E4(2)）→ S 回 **op 7 ResConnectToSvr**
    （E1(1)+E1(10)+E4(2)+E4(IP)+E2(3838)；期间夹有 3 个 op 86 周期推送）→ 客户端关闭登录连接（FIN），
    新开连线到 IP:3838（60246 → 60248）
 5. （新连线上）C 发 op 7 OnConnEstablished（EN 36B：E1(1) + [E2(4)+会话串] + E4(639) + E4(0) + 8B 原样 +
-   频道hash×2 + E1(1)；前段与 TW 共用 userCount/name/userId 解析）→ S 回
+   频道hash×2 + E1(1)（hash=0x12233322 两处同值，op 15 轮询包里也带它，语义未定，**不是** op 11 的缓存校验和）；
+   前段与 TW 共用 userCount/name/userId 解析）→ S 回
    **[48 空体, 13, 14, 97, 122 UserDynamicInfo, 87, 423]**（线序 seq=43~61）；
    随后 C 跟发 297 / 302 / 310 / 64 / 293 / 78 批次 → 批次收齐（78 最后）后 S 按线序回
    **[310, 302, 254, 72 用户列表, 293, 78, 4(13B), 4(65B), 227, 60 46KB, 310, 302]**（seq=64~97，
    用户列表据此显示）→ 进入大厅期
    ⚠️ 线序 = seq 顺序；dump_flow.py 按时间戳排序会因 TCP 合包失真（如 122 实际紧跟 97，却显示在 60 之后）
-6. 进频道：C 发 op 11（4B 频道 hash）→ S 回 [11 ChannelsExtraInfo 218B, 13 44B, 12 27B, 11, 13]
+6. 进频道：C 发 op 11 EnterChannelReq.kt → S 回 [11 ChannelsExtraInfo 218B, 13 44B, 12 27B, 11, 13]
 7. 进频道握手：C 收齐 72 用户列表后自动发 **op 81 空包** →
    S 跟发整条**进频道握手推送** [310, 302,] 413, 198, 200 MyPageSlots, 274×2, 122 UserDynamicInfo, 212,
    210 DynamicMapInfo, 87 RoomList, 65 6.8KB(压缩块), 204, 66, 14(9B 变体), 20, 261, 247, 423, 81 名册, 72

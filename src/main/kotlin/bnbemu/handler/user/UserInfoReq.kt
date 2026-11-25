@@ -100,10 +100,7 @@ fun sendUserInfo(c: ClientSocket, slotIndex: Int = 0) {
         // （0=NotLogged、1=LoggedInLoginServer、10=ConnectedTo、11=商店、其他=ConnectedTo2），
         // 见 UserInfoResult 里 PRESENCE_* 的注释，所以只能走状态 10。
         // 房间号默认 0xFFFF = 停在频道等待室，第二行即 "In the channel waiting room."，
-        // 不做「在 xx 房间 / 对局中」的细分。
-        // 频道名固定取第一个频道：op 11 客户端只回 4B 不透明 hash（抓包 2C 90 7D 4C，与频道名的
-        // CRC32/FNV/djb2 都对不上），EnterChannelReq 无从还原玩家实际选了哪个频道，而单机版所有
-        // 频道都指向本机，显示哪个名字只影响这一行文案。
+        // 不做「在 xx 房间 / 对局中」的细分。 // 频道名固定取第一个频道
         presenceState = PRESENCE_IN_CHANNEL,
         channelName = EN_CHANNELS.first().name,
     )
