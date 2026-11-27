@@ -112,7 +112,12 @@ import org.tinylog.kotlin.Logger
 //   - meta[1] 角色ID: 低6位 (0..63), 抓包玩家 ffdf 默认选 5 (宝宝 CharacterType.Boz)
 //   - meta[2] 颜色ID: 低5位 (0..31), 0=红队/0号色
 // 三种默认构造策略：
-//   1) isStart == true : 对局开局态 — 不标房主位、置 FLAG_READY(0x04)，对应抓包 [0x04, 0x05, 0x00] (a0 6d 5a)
+//   1) isStart == true : 对局开局态 — 置 FLAG_READY(0x04) 并**保留槽位原有旗标**（含房主位）。
+//      ⚠️ bit1 一位两用：准备阶段叫「房主」，**局内**叫「地图脚本控制权」——
+//         客户端 `sub_68848D` 就读它决定谁发 C→S op 133（地图脚本炮台炸弹）。
+//         所以开局这一发必须保住它，否则金银岛那 30 张图的炮台全程哑火
+//         （历史坑：曾为了逐字节对齐 77B 抓包 `and FLAG_CHIEF.inv()`，把炮台一起关掉了）。
+//      无 slot 时退化为 0x04，与抓包基准 [0x04, 0x05, 0x00] (a0 6d 5a) 一致。
 //   2) slot != null    : 真实房间槽位 — 使用 slot.state/bomber/color（房主仅 0x02 不带 0x04，防 AutoReady=1 误发 op 84）
 //   3) slot == null    : 无槽位兼容基准 — 房主+准备位 [0x06, 0x05, 0x00] (a0 6f 5a)，对齐 tst.pcap 抓包基准
 // ============================================================================
@@ -190,7 +195,8 @@ fun SetPlayer(
     session: ByteArray = player?.let { encodeName(it.charName) } ?: ByteArray(0),
     isStart: Boolean = false,
     slotState: Int = when {
-        isStart -> ((slot?.state?.toInt() ?: 0) and FLAG_CHIEF.inv()) or FLAG_READY
+        // 开局态: 只补 READY, **不清房主位** —— bit1 局内是地图脚本控制权 (sub_68848D)
+        isStart -> (slot?.state?.toInt() ?: 0) or FLAG_READY
         slot != null -> slot.state.toInt()
         else -> FLAG_CHIEF or FLAG_READY
     },

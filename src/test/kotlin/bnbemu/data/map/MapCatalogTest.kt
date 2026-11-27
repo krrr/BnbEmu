@@ -39,8 +39,8 @@ class MapCatalogTest {
         assertEquals(1, t.levelLimit)
         assertFalse(t.premiumOnly)
         assertEquals("Theme/Bula", t.themeName)
-        assertEquals(15, t.header.arg40, "真端 +12（v1000 的 arg40）在 171 张图上恒为 15")
-        assertEquals(13, t.header.arg44, "真端 +16（arg44）在 171 张图上恒为 13")
+        assertEquals(15, t.header.width, "真端 +12（v1000 的 arg40）在 171 张图上恒为 15")
+        assertEquals(13, t.header.height, "真端 +16（arg44）在 171 张图上恒为 13")
     }
 
     @Test

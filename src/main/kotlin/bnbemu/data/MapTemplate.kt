@@ -23,8 +23,8 @@ data class MapHeader(
     val version: Int,           // +0
     val maxTeam: Int,           // +4   队伍/颜色组数（1=单人图 / 2 / 3 / 4 / 8=混战）
     val old: Int,               // +8
-    val arg40: Int,             // +12  171 张图恒为 15
-    val arg44: Int,             // +16  171 张图恒为 13
+    val width: Int,             // +12  171 张图恒为 15
+    val height: Int,             // +16  171 张图恒为 13
     val maxPlayer: Int,         // +20  房间总人数上限（实测只有 1 / 4 / 6 / 8）
     val levelLimit: Int,        // +24  进图等级门槛（500 = 常规玩法够不到的锁图）
     val premiumOnly: Int,       // +28  1 = 会员专属
@@ -53,6 +53,15 @@ data class MapTemplate(
     val name: String,
     val themeName: String?,     // null = "Map/_xxx" 这类无主题图
     val header: MapHeader,
+    /**
+     * 该图 `.bin` 尾部的 `<mapscript>` 里是否含 `<bomb .../>` 动作（地图脚本炮台 / 金银岛炮台）。
+     *
+     * 只有含它的地图才会在局内由客户端发 C→S op 133 上报炮击格子；服务端据此在开局
+     * op 100 里给 0 号槽补「地图脚本控制权」（bit1，见 `SetPlayer.mapScriptController`）。
+     * 扫描的是 `<mapscript>` 里的 `<bomb>` 节点，30 张图命中（PangLand00~16 / Clover01~06 /
+     * SnowyFields15~16 / Monster19~21,36 / MonSeal99）。
+     */
+    val hasMapScriptBombs: Boolean = false,
 ) {
     /** 真端数据包里的条目名（无扩展名）："Map/Bula00"。 */
     val entry: String get() = "Map/$name"
@@ -62,6 +71,15 @@ data class MapTemplate(
     val levelLimit: Int get() = header.levelLimit
     val premiumOnly: Boolean get() = header.premiumOnly == 1
     val isMissionMap: Boolean get() = header.missionType > 0
+
+    /** 棋盘列数 (宽)。743/746 张图恒为 15，个别奖励图更大。 */
+    val width: Int get() = header.width.coerceIn(1, 64)
+
+    /** 棋盘行数 (高)。743/746 张图恒为 13。 */
+    val height: Int get() = header.height.coerceIn(1, 64)
+
+    /** 格子是否落在本图棋盘内（注意参数顺序: 先列后行, 与协议 `(row, col)` 相反）。 */
+    fun containsCell(col: Int, row: Int): Boolean = col in 0 until width && row in 0 until height
 
     /** 与真端 GetRandomMapIdx 相同的初筛条件：人数与队伍数都得装得下。 */
     fun canHost(players: Int, teams: Int): Boolean = players in 1..maxPlayer && teams <= maxTeam
@@ -80,24 +98,24 @@ data class MapTemplate(
             val version = r.int()
             val maxTeam: Int
             val old: Int
-            val arg40: Int
+            val width: Int
             if (version < MAP_VERSION_MIN) {
                 maxTeam = MAX_SESSION_SLOTS
                 old = 1
-                arg40 = version
+                width = version
             } else {
                 maxTeam = r.int()
                 old = r.int()
-                arg40 = r.int()
+                width = r.int()
             }
             // 两种格式都先吃掉 +44 再读 +48 的人数（真端 0040C2B5 同一段代码）。
-            val arg44 = r.int()
+            val height = r.int()
             val header = MapHeader(
                 version = version,
                 maxTeam = maxTeam,
                 old = old,
-                arg40 = arg40,
-                arg44 = arg44,
+                width = width,
+                height = height,
                 maxPlayer = r.int(),
                 levelLimit = r.int(),
                 premiumOnly = r.int(),
@@ -116,7 +134,26 @@ data class MapTemplate(
                 name = name,
                 themeName = themeNameOf(name),
                 header = header,
+                hasMapScriptBombs = containsMapScriptBomb(data),
             )
+        }
+
+        /**
+         * 有没有 `<mapscript>` 里的 `<bomb .../>` 动作。
+         *
+         * 全文扫（地图 .bin 最大 ~140KB，载入时一次即可）：脚本段在文件末尾，但
+         * `<bomb>` 节点可能散布得很开，只看尾部窗口会漏掉 PangLand11/12/16 这类长脚本。
+         */
+        private fun containsMapScriptBomb(data: ByteArray): Boolean {
+            for (i in 0..data.size - 5) {
+                if (data[i] == '<'.code.toByte() &&
+                    data[i + 1] == 'b'.code.toByte() &&
+                    data[i + 2] == 'o'.code.toByte() &&
+                    data[i + 3] == 'm'.code.toByte() &&
+                    data[i + 4] == 'b'.code.toByte()
+                ) return true
+            }
+            return false
         }
     }
 }

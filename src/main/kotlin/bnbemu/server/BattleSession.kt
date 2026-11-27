@@ -2,6 +2,7 @@ package bnbemu.server
 
 import bnbemu.domain.MAX_SESSION_SLOTS
 import bnbemu.debugMode
+import bnbemu.data.MapCatalog
 import bnbemu.netty.ClientSocket
 import bnbemu.netty.PKT
 import bnbemu.packet.battle.Airplane
@@ -15,6 +16,10 @@ import bnbemu.packet.battle.DrillResult
 import bnbemu.packet.battle.GameResult
 import bnbemu.packet.battle.GameResultSlotSnapshot
 import bnbemu.packet.battle.InitGameResult
+import bnbemu.packet.battle.MAP_SCRIPT_BOMB_ID_FIRST
+import bnbemu.packet.battle.MAP_SCRIPT_BOMB_ID_LAST
+import bnbemu.packet.battle.MAP_SCRIPT_SLOT
+import bnbemu.packet.battle.MapScriptBomb
 import bnbemu.packet.battle.MovableBoxMove
 import bnbemu.packet.battle.ReviveBomber
 import bnbemu.packet.battle.SetBombState
@@ -27,6 +32,34 @@ import io.netty.util.concurrent.ScheduledFuture
 import org.tinylog.kotlin.Logger
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
+
+// ============================================================================
+// 局内包第 1 栏 E2「context 槽号」= 客户端 CGameContext 在 CGameStage 里的下标（0/1/2），**不是房间号**
+// ============================================================================
+// 客户端 `CGameStage` 里有一个 CGameContext* 数组（10 槽上限：`sub_548AA4` 对 idx > 9 直接
+// 返回 0），实战只建 0/1/2 三个（`sub_55596B` 里三处 `sub_548A61(stage, idx)`），**id 就是槽号**：
+//
+//     sub_548A61(stage, idx) → sub_536B05(mem, idx) → *(CGameContext + 254080) = idx
+//
+// 当前用哪一个由 stage / 玩法决定（同一函数里）：
+//
+//     v4 = 0;
+//     if (CMainSystem+328 != 0)  v4 = 1;      // 非普通 stage（SetStage(1) 那类会置 +328）
+//     else if (mode == 14)       v4 = 2;      // 怪物玩法
+//     sub_548353(stage, v4);                  // *(CGameStage+12492) = ctx[v4]
+//
+// 客户端拿它做整包校验：`sub_54A3EA`（op 139）开头 `E2 != sub_532BC3(ctx)` 就直接丢弃。
+// 于是服务端只能在**开局**按同一个规则算出它（既不是客户端下发，也不能从报文里"学"）：
+//
+//   · 普通对局（练习房 / 普通房）              → 0  [BATTLE_CONTEXT_NORMAL]
+//   · 特殊 stage（SetStage(1) 那类）           → 1  [BATTLE_CONTEXT_SPECIAL_STAGE]
+//   · 怪物玩法 boss 关（客户端 mode == 14）    → 2  [BATTLE_CONTEXT_MONSTER]
+//
+// 抓包实证：真实服 op139（`cap/practice_s2c_op139_24B_*.bin`）第 1 栏恒 0，与本项目当前玩法一致。
+// 有请求包可回显的（op106 → op139、op110 → op143）仍原样回显客户端给的值，不要用这里的常量覆盖。
+const val BATTLE_CONTEXT_NORMAL = 0
+const val BATTLE_CONTEXT_SPECIAL_STAGE = 1
+const val BATTLE_CONTEXT_MONSTER = 2
 
 /**
  * 槽位在本局内的生命状态。
@@ -72,6 +105,14 @@ data class BattleSlotState(
 class BattleSession(
     private val executor: EventLoop,
     val config: BattleConfig = BattleConfig(),
+    /**
+     * 局内包第 1 栏 E2 的「context 槽号」= 客户端 `CGameContext` 在 `CGameStage` 里的下标，
+     * 取值见 [BATTLE_CONTEXT_NORMAL]。
+     *
+     * 开局定格、运行期不变；没有请求包可回显的局内消息（地图脚本炮台 op 133 → op 139 等）
+     * 统一取它。有请求包可回显的（op 106 → op 139）原样回显客户端值，与本字段无关。
+     */
+    val contextSlot: Int = BATTLE_CONTEXT_NORMAL,
     initialSlots: Array<BattleSlotState> = Array(MAX_SESSION_SLOTS) { BattleSlotState(it, isHuman = false, isAI = false) },
     private val broadcastAll: (Array<out PKT>) -> Unit = {},
     private val clientsProvider: () -> Sequence<ClientSocket> = { emptySequence() },
@@ -945,28 +986,115 @@ class BattleSession(
             }
             id
         }
+        registerBomb(allocatedId, slotId, gridX, gridY, isSpecial, broadcastInitialState)
+        return allocatedId
+    }
+
+
+    /** 把一颗泡登记进本局（异步，避免在 handler 里做锁内工作）。 */
+    private fun registerBomb(
+        bombId: Int,
+        slotId: Int,
+        gridX: Int,
+        gridY: Int,
+        isSpecial: Boolean,
+        broadcastInitialState: Boolean,
+    ) {
         executor.execute {
             if (isDestroyed) return@execute
-            val bomb = Bomb(allocatedId, slotId, (gridY shl 8) or gridX, 0, isSpecial).apply {
+            val bomb = Bomb(bombId, slotId, (gridY shl 8) or gridX, 0, isSpecial).apply {
                 this.gridX = gridX
                 this.gridY = gridY
-                this.expireAt = System.currentTimeMillis() + 2500   // 引信 2.5s, 到点由 onTick 广播 state=0 引爆
+                this.expireAt = System.currentTimeMillis() + config.bombFuseMs   // 引信, 到点由 onTick 广播 state=0 引爆
             }
             synchronized(bombs) {
                 if (isDestroyed) return@execute
-                bombs.removeIf { it.id == allocatedId }
+                bombs.removeIf { it.id == bombId }
                 bombs += bomb
             }
             if (broadcastInitialState && !isDestroyed) {
-                broadcast(SetBombState(allocatedId, state = 1))
+                broadcast(SetBombState(bombId, state = 1))
             }
         }
-        return allocatedId
     }
 
     fun getBomb(bombId: Int): Bomb? {
         synchronized(bombs) {
             return bombs.find { it.id == bombId }
+        }
+    }
+
+    // ========================================================================
+    // 地图脚本炮台 (C→S op 133 -> S→C op 139)
+    // ========================================================================
+
+    /**
+     * 炮台泡的 bombId 循环计数（[MAP_SCRIPT_BOMB_ID_FIRST]..[MAP_SCRIPT_BOMB_ID_LAST]）。
+     *
+     * 与玩家泡的 [nextBombId] 完全隔离：玩家泡的 id 来自 `bombToken`（`slotId + 8*k`），
+     * 而炮台泡必须落在这段「动态对象预留区」里（客户端 `CMapPublicValue` 是 1000 条表，
+     * 0..599 给棋盘自带条目，600..999 才是动态的）。
+     */
+    private var nextScriptBombId = MAP_SCRIPT_BOMB_ID_FIRST
+
+    private fun allocateScriptBombId(): Int = synchronized(bombs) {
+        val id = nextScriptBombId
+        nextScriptBombId = if (id >= MAP_SCRIPT_BOMB_ID_LAST) MAP_SCRIPT_BOMB_ID_FIRST else id + 1
+        id
+    }
+
+    /**
+     * 地图脚本炮台开火：客户端 (C→S op 133) 已经挑好格子，这里只做**落地 + 广播**。
+     *
+     * 每格注册一颗 slot=[MAP_SCRIPT_SLOT] 的泡，并广播一条 S→C op 139（带炮口像素），
+     * 让所有客户端（含发起者，它本地不预建泡）看到「从炮口飞进该格」；
+     * 2.5s 引信后由 [onTick] 广播 op 138 引爆，与玩家泡同一条路径。
+     *
+     * ⚠️ 不发 op 138 state=1：那会截断起飞动画（同发射型水泡的坑，见
+     * `SetBomberEventReq` 注释）。炮台泡走的是 op139 的 `+68 → sub_578AC1 → sub_4597B2`
+     * 起飞路径，`bomb+192`(激活位) 保持工厂默认值 1，直接 state=0 就能炸。
+     *
+     * @param cells `(row, col)`，与 op 133 线序一致
+     */
+    fun onMapScriptBombs(
+        client: ClientSocket,
+        mapId: Int,
+        power: Int,
+        sourceX: Int,
+        sourceY: Int,
+        initialState: Int,
+        cells: List<Pair<Int, Int>>,
+    ) {
+        if (isDestroyed) return
+        if (clientsProvider().none { it === client }) return
+        val template = MapCatalog.of(mapId)
+        // 客户端的扫描已经过一轮过滤，这里只做越界兜底（个别图不是 15x13）。
+        val targets = cells.distinct().filter { (row, col) -> template?.containsCell(col, row) != false }
+        if (targets.isEmpty()) return
+
+        targets.forEach { (row, col) ->
+            val id = allocateScriptBombId()
+            // 服务端内部的 gridX 就是「行」（与 op108/op124 的 0..12 判定一致），不要写反。
+            registerBomb(
+                bombId = id,
+                slotId = MAP_SCRIPT_SLOT,
+                gridX = row,
+                gridY = col,
+                isSpecial = false,
+                broadcastInitialState = false,
+            )
+            broadcast(
+                MapScriptBomb(
+                    power = power,
+                    bombId = id,
+                    sourceX = sourceX,
+                    sourceY = sourceY,
+                    row = row,
+                    col = col,
+                    initialState = initialState,
+                    contextSlot = contextSlot,
+                )
+            )
         }
     }
 
@@ -996,6 +1124,7 @@ class BattleSession(
 
     private fun clearSimulationState() {
         synchronized(bombs) { bombs.clear() }
+        nextScriptBombId = MAP_SCRIPT_BOMB_ID_FIRST
         movableBoxes.clear()
         movableBoxSentAt.clear()
         bombMoves.clear()

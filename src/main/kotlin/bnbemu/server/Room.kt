@@ -195,6 +195,9 @@ class Room {
             BattleSession(
                 executor = executor,
                 config = battleConfig.copy(),
+                // 局内包首栏的「context 槽号」在这里定格: 普通对局 0; 将来支持怪物玩法 boss 关
+                // (客户端 mode == 14) 时改成 BATTLE_CONTEXT_MONSTER, 否则客户端会丢包。
+                contextSlot = BATTLE_CONTEXT_NORMAL,
                 initialSlots = initialSlots,
                 broadcastAll = { packets -> BC(*packets) },
                 clientsProvider = { uniqueClients },

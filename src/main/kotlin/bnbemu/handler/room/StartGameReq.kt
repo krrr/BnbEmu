@@ -123,10 +123,13 @@ val StartGameReq = PKTHandler { c ->
             // 出生點數量由地圖決定（4 人图只有 0..3），按参战槽顺序分配，见 assignSpawnPositions
             slotConfigs = slotConfigs,
         ),
-        // op 100 开局版 (77B, 抓包 practice_s2c_op100_79B_1.bin): isStart=true 去掉 enterEffectId
-        // 与房主位, 只置 FLAG_READY。slotId 恒 0 —— 真人恒在槽 0 (CreateSessionReq / Room.begin),
-        // 角色与颜色由上一发 op 112 的槽位名册决定, 这里的槽位元数据与抓包基准保持 Boz/0。
-        SetPlayer(slotId = 0, player = player, isStart = true),
+        // op 100 开局版 (77B): isStart=true 去掉 enterEffectId, 置 FLAG_READY。
+        // slotId 恒 0 —— 真人恒在槽 0 (CreateSessionReq / Room.begin), 角色与颜色由上一发
+        // op 112 的槽位名册决定。
+        // ⚠️ 必须把 slot 传进去: meta[0] 的 bit1 局内是「地图脚本控制权」
+        //    (客户端 sub_68848D 就读它决定谁发 C→S op 133 炮台炸弹), 不传 slot 就只剩
+        //    FLAG_READY=0x04, 金银岛那 30 张图的炮台会全程哑火。见 docs/map-cannon-sprinkler.md。
+        SetPlayer(slotId = 0, slot = room.slots.getOrNull(0), player = player, isStart = true),
         // op 136 開局令: 時鐘 + 局次密鑰 + UDP 對端表。名冊必須與上面 op 112 的 slotConfigs
         // 同源 (客戶端會按 occupied 位反向校驗名冊: flag=0 就刪人, flag=1 卻沒人就回 op 149)。
         // 本模擬器只有 TCP, 所有 UDP 端點填 0 —— 客戶端 0x00789FD0 對 ip/port 為 0 直接跳過,

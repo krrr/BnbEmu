@@ -161,8 +161,21 @@ class SetPlayerReadyTest {
         val withSlot = encodeBody(SetPlayer(slotId = 0, slot = explicitSlot, level = 1, session = tok, isStart = false))
         assertEquals(byteArrayOf(FLAG_CHIEF.toByte(), 10, 3).toList(), decodeMeta3(withSlot.copyOfRange(10, 13)).toList())
 
-        // 4) isStart == true, slot != null: 开局态清除 FLAG_CHIEF 并置 FLAG_READY，保留槽位角色/颜色
+        // 4) isStart == true, slot != null: 开局态置 FLAG_READY 并**保留房主位**
+        //    bit1 局内是「地图脚本控制权」(客户端 sub_68848D 就读它决定谁发 C→S op 133
+        //    炮台炸弹), 清掉它会让金银岛那 30 张图的炮台全程哑火
         val startWithSlot = encodeBody(SetPlayer(slotId = 0, slot = explicitSlot, level = 1, session = tok, isStart = true))
-        assertEquals(byteArrayOf(FLAG_READY.toByte(), 10, 3).toList(), decodeMeta3(startWithSlot.copyOfRange(9, 12)).toList())
+        assertEquals(
+            byteArrayOf((FLAG_CHIEF or FLAG_READY).toByte(), 10, 3).toList(),
+            decodeMeta3(startWithSlot.copyOfRange(9, 12)).toList()
+        )
+
+        // 5) isStart == true, 非房主槽位: 只补 READY, 不凭空造出控制权
+        val plainSlot = Slot(meta = byteArrayOf(0, 10, 3))
+        val startPlain = encodeBody(SetPlayer(slotId = 1, slot = plainSlot, level = 1, session = tok, isStart = true))
+        assertEquals(
+            byteArrayOf(FLAG_READY.toByte(), 10, 3).toList(),
+            decodeMeta3(startPlain.copyOfRange(9, 12)).toList()
+        )
     }
 }

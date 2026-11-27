@@ -8,6 +8,11 @@ package bnbemu.server
 data class BattleConfig(
     /** onTick 调度周期 (ms) */
     var tickIntervalMs: Long = 200L,
+    /**
+     * 水泡引信 (ms)：注册后到点由 `onTick` 广播 op 138 state=0 引爆。
+     * 覆盖玩家泡 (op 106) 与地图脚本炮台泡 (op 133) 两条路径。
+     */
+    var bombFuseMs: Long = 2_500L,
     /** 对局超时上限 (ms): 对齐真端 GAME_DURATION_LIMIT_MS = 0x2BF20 (3 分钟); <=0 表示不超时 */
     var matchTimeoutMs: Long = 180_000L,
     /** 结算结果包的下发延迟 (ms) */

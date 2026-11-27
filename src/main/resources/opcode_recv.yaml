@@ -55,6 +55,8 @@ DropObstacleReq: 148
 EventItemReq: 149
 DestroyBoxReq: 126
 DrillReq: 124
+MapScriptBombReq: 133
+LucciTileHitReq: 134
 GenerateGhostReq: 151
 DestroyGhostReq: 152
 #LapFinishedReq: 154

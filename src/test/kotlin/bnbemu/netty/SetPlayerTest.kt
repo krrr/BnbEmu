@@ -70,6 +70,9 @@ class SetPlayerTest {
     @Test
     fun testStartLevel1MatchesCaptureBlobExact() {
         // 当 isStart=true, level=1 时, 必须与原始开始抓包 77B body 逐字节一致
+        // ⚠️ 这里刻意**不传 slot**，走的是「无槽位」退化路径 (meta=0x04)。
+        //    生产路径 StartGameReq 会把 slot 传进来，房主槽的 meta 是 0x06
+        //    (保留 bit1 = 地图脚本控制权，见 MapScriptBombTest)。
         val captureFile = File("cap/practice_s2c_op100_79B_1.bin")
         assertTrue(captureFile.exists(), "cap/practice_s2c_op100_79B_1.bin 必须存在")
         val exp = captureFile.readBytes().drop(2).toByteArray() // 去掉 2B opcode 前缀
