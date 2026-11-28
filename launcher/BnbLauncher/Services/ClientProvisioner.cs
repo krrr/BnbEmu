@@ -111,9 +111,10 @@ public sealed class ClientProvisioner
 
     /// <summary>
     /// 把客户端目录准备到可启动状态：拉子模块（需要时）→ 复制 exe/dll → 打包 idd/idx。
-    /// 可重复调用，已经是最新状态时几乎不花时间。
+    /// 可重复调用，已经是最新状态时几乎不花时间；<paramref name="forceReinstall"/> 为 true 时
+    /// 会先清空整个客户端目录再从头重建（包括重新复制 resource\other 里的 exe/dll 与重新打包全部资源）。
     /// </summary>
-    public async Task PrepareAsync(AppConfig cfg, IProgress<SetupProgress>? progress, bool forceRepack,
+    public async Task PrepareAsync(AppConfig cfg, IProgress<SetupProgress>? progress, bool forceReinstall,
         CancellationToken ct)
     {
         if (!AppPaths.SourceExists)
@@ -121,7 +122,10 @@ public sealed class ClientProvisioner
             throw new InvalidOperationException("The source has not downloaded yet, so the client cannot be prepared.");
         }
 
-        Directory.CreateDirectory(AppPaths.ClientDir);
+        if (forceReinstall && IsRunning)
+        {
+            throw new InvalidOperationException("Close the running client before reinstalling.");
+        }
 
         // 1) 客户端资源（resource 子模块，首次要下几百 MB）
         if (!ResourceAvailable)
@@ -146,19 +150,70 @@ public sealed class ClientProvisioner
             Say(LogLevel.Success, "Client resources updated");
         }
 
-        // 2) 散装文件：exe / dll / 字体 / nm.bik
-        var copied = await Task.Run(() => SyncLooseFiles(progress, ct), ct);
+        // 2) 强制重装时先整目录清掉，保证 runtime\client 从零完整重建
+        if (forceReinstall)
+        {
+            await Task.Run(() => ClearClientDir(progress, ct), ct);
+        }
+
+        Directory.CreateDirectory(AppPaths.ClientDir);
+
+        // 3) 散装文件：exe / dll / 字体 / nm.bik
+        var copied = await Task.Run(() => SyncLooseFiles(progress, forceOverwrite: forceReinstall, ct), ct);
         if (copied > 0)
         {
             Say(LogLevel.Info, $"Copied {copied} client program files to {AppPaths.ClientDir}");
         }
 
-        // 3) 资源包
-        await Task.Run(() => BuildArchives(progress, forceRepack, ct), ct);
+        // 4) 资源包
+        await Task.Run(() => BuildArchives(progress, forceReinstall, ct), ct);
     }
 
-    /// <summary>把 resource\other 下的文件按相对路径镜像到客户端目录，内容没变就跳过。</summary>
-    private int SyncLooseFiles(IProgress<SetupProgress>? progress, CancellationToken ct)
+    /// <summary>清空整个客户端目录，确保残留文件/旧版 exe/旧 idd 全部清干净。</summary>
+    private void ClearClientDir(IProgress<SetupProgress>? progress, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        if (!Directory.Exists(AppPaths.ClientDir)) return;
+
+        progress?.Report(SetupProgress.Indeterminate("Clearing client folder"));
+        Say(LogLevel.Info, $"Clearing {AppPaths.ClientDir}");
+
+        try
+        {
+            // 先尝试删 CA.exe：若上一次启动器留下的游戏进程还在跑，立刻在此失败，
+            // 避免先把几百 MB 的资源包删掉才发现 exe 被占用。
+            if (File.Exists(ExePath))
+            {
+                ClearReadOnly(ExePath);
+                File.Delete(ExePath);
+            }
+
+            foreach (var file in Directory.EnumerateFiles(AppPaths.ClientDir, "*", SearchOption.AllDirectories))
+            {
+                ct.ThrowIfCancellationRequested();
+                ClearReadOnly(file);
+            }
+
+            Directory.Delete(AppPaths.ClientDir, recursive: true);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            throw new InvalidOperationException(
+                $"Cannot clear {AppPaths.ClientDir} — close the running client and try again.", ex);
+        }
+    }
+
+    private static void ClearReadOnly(string path)
+    {
+        var attrs = File.GetAttributes(path);
+        if ((attrs & FileAttributes.ReadOnly) != 0)
+        {
+            File.SetAttributes(path, attrs & ~FileAttributes.ReadOnly);
+        }
+    }
+
+    /// <summary>把 resource\other 下的文件按相对路径镜像到客户端目录，内容没变就跳过（forceOverwrite 时全量覆盖）。</summary>
+    private int SyncLooseFiles(IProgress<SetupProgress>? progress, bool forceOverwrite, CancellationToken ct)
     {
         var srcRoot = Path.Combine(AppPaths.ResourceDir, LooseDirName);
         if (!Directory.Exists(srcRoot))
@@ -175,7 +230,7 @@ public sealed class ClientProvisioner
 
             var rel = Path.GetRelativePath(srcRoot, files[i]);
             var dst = Path.Combine(AppPaths.ClientDir, rel);
-            if (NeedsCopy(files[i], dst))
+            if (forceOverwrite || NeedsCopy(files[i], dst))
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(dst)!);
                 File.Copy(files[i], dst, overwrite: true);
@@ -206,7 +261,7 @@ public sealed class ClientProvisioner
     /// 逐个资源目录打包。指纹没变且输出还在就跳过 —— 这是「点启动」的常规路径，
     /// 只花一次目录扫描的时间。
     /// </summary>
-    private void BuildArchives(IProgress<SetupProgress>? progress, bool forceRepack, CancellationToken ct)
+    private void BuildArchives(IProgress<SetupProgress>? progress, bool forceRebuild, CancellationToken ct)
     {
         var stamps = LoadStamps();
         var total = ArchiveNames.Length;
@@ -226,14 +281,14 @@ public sealed class ClientProvisioner
             }
 
             var stamp = IddArchiveBuilder.ComputeStamp(dir);
-            var upToDate = !forceRepack
+            var upToDate = !forceRebuild
                            && stamps.TryGetValue(name, out var old) && old == stamp
                            && File.Exists(outBase + ".idd")
                            && File.Exists(outBase + ".idx");
 
             if (upToDate)
             {
-                Say(LogLevel.Info, $"{name} unchanged, skipping repack ({ByteSize.Format(new FileInfo(outBase + ".idd").Length)})");
+                Say(LogLevel.Info, $"{name} unchanged, skipping pack ({ByteSize.Format(new FileInfo(outBase + ".idd").Length)})");
                 continue;
             }
 

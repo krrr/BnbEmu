@@ -161,7 +161,7 @@ public sealed class MainViewModel : ObservableObject
         ForceRebuildCommand = new AsyncRelayCommand(ForceRebuildAsync,
             () => !IsBusy && !IsServerRunning && AppPaths.SourceExists);
         LaunchClientCommand = new AsyncRelayCommand(LaunchClientAsync, () => CanLaunchClient);
-        RepackClientCommand = new AsyncRelayCommand(() => PrepareClientAsync(forceRepack: true),
+        ReinstallClientCommand = new AsyncRelayCommand(() => PrepareClientAsync(forceReinstall: true),
             () => !IsBusy && !IsClientRunning && AppPaths.SourceExists);
         OpenFolderCommand = new RelayCommand(() => OpenInExplorer(AppPaths.BaseDir));
         OpenSourceFolderCommand = new RelayCommand(() => OpenInExplorer(AppPaths.SourceDir));
@@ -192,7 +192,7 @@ public sealed class MainViewModel : ObservableObject
     public ICommand ToggleServerCommand { get; }
     public ICommand ForceRebuildCommand { get; }
     public ICommand LaunchClientCommand { get; }
-    public ICommand RepackClientCommand { get; }
+    public ICommand ReinstallClientCommand { get; }
     public ICommand OpenFolderCommand { get; }
     public ICommand OpenSourceFolderCommand { get; }
     public ICommand OpenRepoCommand { get; }
@@ -409,7 +409,7 @@ public sealed class MainViewModel : ObservableObject
     /// <summary>第二行小字：要么是资源包体积与目录，要么解释为什么点不了。</summary>
     public string ClientDetail => ClientState switch
     {
-        ClientState.Preparing => "Pulling the resource submodule, copying files and repacking resources; the first run can take a few minutes",
+        ClientState.Preparing => "Pulling the resource submodule, copying files and packing resources; the first run can take a few minutes",
         ClientState.Ready or ClientState.Running => DescribeClientFiles(),
         _ => !AppPaths.SourceExists
             ? "The client can be prepared once the source is ready"
@@ -1320,7 +1320,7 @@ public sealed class MainViewModel : ObservableObject
         if (IsClientRunning) return;
 
         // 1) 客户端目录还没拼出来：先准备（首次要拉子模块 + 打包，会走进度条）
-        if (!ClientProvisioner.IsPrepared && !await PrepareClientAsync(forceRepack: false))
+        if (!ClientProvisioner.IsPrepared && !await PrepareClientAsync(forceReinstall: false))
         {
             return;
         }
@@ -1351,7 +1351,7 @@ public sealed class MainViewModel : ObservableObject
     }
 
     /// <summary>准备客户端目录，返回是否已经可以启动。</summary>
-    private async Task<bool> PrepareClientAsync(bool forceRepack)
+    private async Task<bool> PrepareClientAsync(bool forceReinstall)
     {
         if (!AppPaths.SourceExists)
         {
@@ -1361,18 +1361,23 @@ public sealed class MainViewModel : ObservableObject
         }
 
         ClientState = ClientState.Preparing;
-        StatusText = "Preparing client…";
+        StatusText = forceReinstall ? "Reinstalling client…" : "Preparing client…";
 
         var ok = false;
-        await RunOperationAsync(forceRepack ? "Repacking client resources" : "Preparing client", async ct =>
+        await RunOperationAsync(forceReinstall ? "Reinstalling client" : "Preparing client", async ct =>
         {
-            await _client.PrepareAsync(_config, CreateProgress(), forceRepack, ct);
+            await _client.PrepareAsync(_config, CreateProgress(), forceReinstall, ct);
             ok = true;
         }, silent: false);
 
         // 异常/取消时 Preparing 不会被清掉（RunOperationAsync 只负责 IsBusy 那套），
         // 这里强制按磁盘实际状态落回去：失败就回到「未准备」，用户可以直接再点一次。
         RefreshClientUi(settle: true);
+
+        if (ok && ClientProvisioner.IsPrepared)
+        {
+            StatusText = forceReinstall ? "Client reinstalled" : "Client ready";
+        }
 
         // 准备流程跑完了但文件还是不齐：多半是 resource 子模块缺内容（缺 manifest 的目录会被跳过）
         if (ok && !ClientProvisioner.IsPrepared)

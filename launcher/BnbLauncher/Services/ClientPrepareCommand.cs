@@ -8,7 +8,7 @@ namespace BnbLauncher.Services;
 /// 走的就是界面上「启动客户端」第一次点击时的同一套逻辑（拉 resource 子模块、
 /// 复制 exe/dll、打包 idd/idx），只是不开窗口、不启动游戏。适合改完资源后
 /// 一次性把 runtime\client 铺好，或者排查打包问题。
-/// <c>--force</c> 会忽略指纹强制重新打包三个资源包。
+/// <c>--force</c> 会清空 runtime\client 并从头完整重建（重新复制 resource\other 与重新打包三个资源包）。
 /// </summary>
 public static class ClientPrepareCommand
 {

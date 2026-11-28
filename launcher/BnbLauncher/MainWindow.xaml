@@ -324,13 +324,13 @@
                             </Border>
                         </StackPanel>
 
-                        <Button Grid.Column="1" Content="Repack" Style="{StaticResource LinkButton}"
-                                VerticalAlignment="Center" Margin="10,0,0,0" Command="{Binding RepackClientCommand}">
+                        <Button Grid.Column="1" Content="Reinstall" Style="{StaticResource LinkButton}"
+                                VerticalAlignment="Center" Margin="10,0,0,0" Command="{Binding ReinstallClientCommand}">
                             <Button.ToolTip>
                                 <ToolTip Style="{StaticResource HintToolTip}" Placement="Top">
                                     <StackPanel>
-                                        <TextBlock Text="Force repack resources" FontWeight="SemiBold" />
-                                        <TextBlock Text="Repacks fx / CharTE / EmoTE under resource into idd/idx. Normally they are repacked only when the source folders change; this forces a rebuild."
+                                        <TextBlock Text="Reinstall client" FontWeight="SemiBold" />
+                                        <TextBlock Text="Clears runtime\client and rebuilds it from scratch: copies CA.exe and program files from resource\other, and packs fx / CharTE / EmoTE into idd/idx."
                                                    TextWrapping="Wrap" Opacity="0.72" Margin="0,3,0,0" />
                                     </StackPanel>
                                 </ToolTip>
@@ -407,7 +407,7 @@
             </Border>
 
             <!-- 客户端卡片：状态圆点 + 状态文案 + 下面一行说明都留在这儿，
-                 「重新打包」在运行环境卡片里，这里只放启动动作 -->
+                 「Reinstall」在运行环境卡片里，这里只放启动动作 -->
             <Border Grid.Column="2" Style="{StaticResource Card}" Padding="18,12">
                 <Grid>
                     <Grid.ColumnDefinitions>

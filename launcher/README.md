@@ -89,7 +89,7 @@ Windows 桌面启动器（WPF / .NET 9 / C#）：用 git 拉取 BnbEmu 最新源
   所以「原样解包 → 原样打包」逐字节一致，改一个文件也只重编那一块
 - 打完会回读校验：idx 头/顺序/条目参数逐条比对，seeded 重算 CRC、`_mm` 解压比长度
 - 资源目录用「相对路径 + 大小 + 修改时间」的滚动哈希当指纹，存在 `client\idd-stamps.json`；
-  指纹没变就跳过整个打包（点一次启动约 1 秒），想强制重打点「重新打包」
+  指纹没变就跳过整个打包（点一次启动约 1 秒），想完整重建客户端点「Reinstall」
 
 ## 启动器自更新
 
@@ -197,7 +197,7 @@ dotnet publish BnbLauncher -c Release -o dist
 .\BnbLauncher.exe --check-update --download   # 顺便下载并校验 SHA-256，验证资产与清单配套
 
 .\BnbLauncher.exe --prepare-client      # 只准备客户端目录（拉子模块/复制/打包），不启动游戏
-.\BnbLauncher.exe --prepare-client --force   # 忽略指纹，强制重打三个资源包
+.\BnbLauncher.exe --prepare-client --force   # 清空 runtime\client 并从头重建（重拷 other + 重打资源包）
 
 .\BnbLauncher.exe --pack-idd <解包目录> <输出基名> [--force]
                                         # 单独把某个解包目录打成 idd/idx，等价于 idd_build.py
