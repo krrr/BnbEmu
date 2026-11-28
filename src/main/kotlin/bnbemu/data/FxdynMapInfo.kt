@@ -70,7 +70,7 @@ object FxdynMapInfo {
      *
      * 反编译链：sub_532337 (CA.exe.c:258183) 写入 CEffectMan+0x24 → sub_531F79 (:258038)
      * 以 `sub_78BB50(stream) == this+9` 决定是否解析记录表；sub_78BB50 = 流 +0x14，
-     * 由 sub_78BB60 (:747998) 对 SSD 块 (a2+5, u24 len) 算 sub_74EE50(0, ...)。
+     * 由 sub_78BB60 (:747998) 对 SSD 块 (a2+5, u32 len) 算 sub_74EE50(0, ...)。
      * 抓包基准 0x36CEE587 已用 cap/fxdynmapinfo_plain.bin (24111 B) 复算一致。
      * 这里从同一份 plain 实时派生，保证 op210 与 op212 永不脱节。
      */

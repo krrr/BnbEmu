@@ -26,7 +26,7 @@ data class NoticeMessage(
  * - 封包格式: [Encode4(len)][SSD 数据块] (无 Encode1Bool 前缀, 与 op 13 ChannelsState 一致)
  *
  * SSD 数据块结构 (客户端 sub_78F1E0 反混淆后交给 CISmartStream, 全是明文):
- * - 块头 (6字节): [0x18][(len-5)&0xFF][u32 0] (标准 SSD 块头, 与 op11/op13 一致)
+ * - 块头 (6字节): [0x18][u32le(len-5)][0x00] (标准 SSD 块头, 由 buildSsdBlock 统一写入)
  * - 块体字段 (明文按顺序); 注意子块内 ReadString (sub_78CE60:783831) 的长度是 **u32 LE**,
  *   不是顶层报文 EncodeStr 的 u16:
  *   1. noticeTitle: ReadString (u32 LE 长度 + 文本) -> 存入 CFxApp (0x994d04) 横幅公告缓冲区 (0x68357f, 偏移 +0x360)
@@ -93,9 +93,6 @@ private fun channelsNoticeBlock(
     tailStatus: Int,
 ): ByteArray {
     val out = ByteArrayOutputStream()
-    out.u8(0x18)
-    out.u8(0) // 占位: (块长 - 5) & 0xFF
-    out.u32le(0)
 
     // 1. 公告横幅标题/文本 (子块 ReadString = u32 LE 串长)
     val titleBytes = noticeTitle.toByteArray(ACP)
@@ -136,9 +133,7 @@ private fun channelsNoticeBlock(
     // 5. 尾部刷新标志
     out.u16le(tailStatus)
 
-    val ba = out.toByteArray()
-    ba[1] = ((ba.size - 5) and 0xFF).toByte()
-    return ba
+    return buildSsdBlock(out.toByteArray(), compress = false)
 }
 
 /*

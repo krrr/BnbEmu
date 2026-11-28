@@ -11,9 +11,9 @@ fun ChannelsExtraInfo() = PKT {
     // 塊結構 2026-08-30 由 login.pcap sq=46 (211B) 逐字節逆向, 重編碼與抓包逐位元組一致
     // (replay_test login 用例斷言, IP 改寫位基準 cap/login_s2c_op11_ip127.bin):
     //   整包 = Encode1Bool(true) + Encode4(塊長) + SSD 資料塊
-    //   塊明文 = [0x18][(塊長-5)&0xFF][u32 0][u16 頻道數 LE] + N × 頻道條目, 經 ssdEncode 變換下發
-    //   塊頭規律在 op1/op2/op11/op12/op13 五個抓包塊全部吻合 (0x18 恆定, 第2字節=塊長-5,
-    //   op2 1854B → 0x39 可驗); op1 條目數為 u8, op11/12/13 為 u16 LE
+    //   塊明文 = [0x18][u32le(塊長-5)][0x00][u16 頻道數 LE] + N × 頻道條目, 經 ssdEncode 變換下發
+    //   塊頭規律在 op1/op2/op11/op12/op13 五個抓包塊全部吻合 (0x18 恆定, [1..4]=u32le 塊長-5);
+    //   op1 條目數為 u8, op11/12/13 為 u16 LE
     //   條目 = u32 名長 + 名 + u32 人數上限 + u8 當前人數 + u8 mapNo + u32 IPv4(BE)
     //          + 14B 恆定欄位 + 3B 續讀標記 (欄位語義見 ChannelEntry)
 //   條目尾 3B 標記: builder 明文恆為 00 00 00, 尾部編碼一律交給 ssdEncode;
@@ -111,17 +111,12 @@ class ChannelEntry(
     }
 }
 
-// 塊明文: [0x18][(塊長-5)&0xFF][u32 0][u16 頻道數 LE] + N × 頻道條目 (塊頭規律見頂部註釋)
+// 塊明文: [0x18][u32le(塊長-5)][0x00][u16 頻道數 LE] + N × 頻道條目 (由 buildSsdBlock 統一寫 4B 塊長)
 private fun channelsExtraBlock(entries: List<ChannelEntry>): ByteArray {
     val out = ByteArrayOutputStream()
-    out.u8(0x18)
-    out.u8(0) // (塊長-5)&0xFF, 組裝完回填
-    out.u32le(0)
     out.u16le(entries.size)
     entries.forEach { e -> e.Encode(out) }
-    val ba = out.toByteArray()
-    ba[1] = ((ba.size - 5) and 0xFF).toByte()
-    return ba
+    return buildSsdBlock(out.toByteArray(), compress = false)
 }
 
 

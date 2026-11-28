@@ -146,11 +146,8 @@ object ShopCatalogData {
     fun loadBaseItems(): List<ShopItemEntry> = decodeBlock(DataResource.bytes("data/shop_catalog_base.bin"))
 
     fun decodeBlock(bytes: ByteArray): List<ShopItemEntry> {
-        val buf = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
-        val magic = buf.get().toInt() and 0xFF
-        require(magic == 0x18) { "Invalid SSD magic: 0x${magic.toString(16)}" }
-        buf.short // blockLen
-        buf.get(); buf.get(); buf.get()
+        val plain = unpackSsdBlock(bytes)
+        val buf = ByteBuffer.wrap(plain).order(ByteOrder.LITTLE_ENDIAN)
         val count = buf.short.toInt() and 0xFFFF
         val items = ArrayList<ShopItemEntry>(count)
         for (i in 0 until count) {
@@ -161,22 +158,16 @@ object ShopCatalogData {
 
     fun buildBlock(items: List<ShopItemEntry>): ByteArray {
         val out = ByteArrayOutputStream()
-        out.u8(0x18)
-        out.u16le(0)
-        out.u8(0); out.u8(0); out.u8(0)
         out.u16le(items.size)
         for (item in items) {
             item.encode(out)
         }
-        val pad = (4 - (out.size() % 4)) % 4
+        // 含 6B SSD 块头后补齐至 4 字节对齐，与 shop_catalog_base.bin 逐字节一致
+        val pad = (4 - ((out.size() + 6) % 4)) % 4
         for (i in 0 until pad) {
             out.u8(0)
         }
-        val ba = out.toByteArray()
-        val blockLen = (ba.size - 5) and 0xFFFF
-        ba[1] = (blockLen and 0xFF).toByte()
-        ba[2] = ((blockLen shr 8) and 0xFF).toByte()
-        return ba
+        return buildSsdBlock(out.toByteArray(), compress = false)
     }
 
     fun encode(items: List<ShopItemEntry>): ByteArray {

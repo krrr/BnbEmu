@@ -3,6 +3,7 @@ package bnbemu.codec;
 import bnbemu.ACP
 import java.io.ByteArrayOutputStream
 import java.util.zip.Deflater
+import java.util.zip.Inflater
 
 // ============================================================================
 // 0x75DAF0 SSD 资料块变换 (ByteArray 版本, 与 SendPacketBase.EncodeCipherStr 的字串版本同源)
@@ -91,6 +92,58 @@ internal fun zlibCompress(data: ByteArray): ByteArray {
         out.toByteArray()
     } finally {
         deflater.end()
+    }
+}
+
+/**
+ * 解析 SSD 块并还原明文负载（对应客户端 sub_78C120 -> sub_78BB60）：
+ * - 块头：`[0x18][u32le(blockLen)][compressFlag]`，要求 `blockLen == block.size - 5`
+ * - `compressFlag == 0`：直接返回 `block[6..]`
+ * - `compressFlag == 1`：读取 `[6..9]` 的 `u32le(rawSize)` 并用 zlib 解压 `[10..]`
+ */
+internal fun unpackSsdBlock(block: ByteArray): ByteArray {
+    require(block.size >= 6) { "SSD 块长度不足: size=${block.size}" }
+    val magic = block[0].toInt() and 0xFF
+    require(magic == 0x18) { "Invalid SSD magic: 0x${magic.toString(16)}" }
+    val blockLen = (block[1].toInt() and 0xFF) or
+            ((block[2].toInt() and 0xFF) shl 8) or
+            ((block[3].toInt() and 0xFF) shl 16) or
+            ((block[4].toInt() and 0xFF) shl 24)
+    require(blockLen >= 1 && 5 + blockLen == block.size) {
+        "SSD 块长度不符: header=$blockLen, size=${block.size}"
+    }
+    return when (val compressFlag = block[5].toInt() and 0xFF) {
+        0 -> block.copyOfRange(6, block.size)
+        1 -> {
+            require(block.size >= 10) { "压缩 SSD 块缺少原始长度字段: size=${block.size}" }
+            val rawSize = (block[6].toInt() and 0xFF) or
+                    ((block[7].toInt() and 0xFF) shl 8) or
+                    ((block[8].toInt() and 0xFF) shl 16) or
+                    ((block[9].toInt() and 0xFF) shl 24)
+            require(rawSize >= 0) { "压缩 SSD 块原始长度非法: rawSize=$rawSize" }
+            zlibDecompress(block, 10, block.size - 10, rawSize)
+        }
+        else -> throw IllegalArgumentException("未知 SSD 压缩标志: $compressFlag")
+    }
+}
+
+internal fun zlibDecompress(data: ByteArray, offset: Int, length: Int, expectedSize: Int): ByteArray {
+    val inflater = Inflater()
+    return try {
+        inflater.setInput(data, offset, length)
+        val out = ByteArray(expectedSize)
+        var pos = 0
+        while (!inflater.finished() && pos < expectedSize) {
+            val n = inflater.inflate(out, pos, expectedSize - pos)
+            if (n == 0 && (inflater.needsInput() || inflater.needsDictionary())) break
+            pos += n
+        }
+        require(pos == expectedSize && inflater.finished()) {
+            "SSD zlib 解压不完整: got=$pos, expected=$expectedSize, finished=${inflater.finished()}"
+        }
+        out
+    } finally {
+        inflater.end()
     }
 }
 

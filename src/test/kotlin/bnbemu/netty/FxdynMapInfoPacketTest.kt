@@ -124,7 +124,7 @@ class FxdynMapInfoPacketTest {
 
     @Test
     fun `ssdStreamChecksum 复现客户端 Adler-32 变体`() {
-        // [0x18][u24 4][0][0]['a','b','c']，客户端只从 offset 5 起算：00 61 62 63
+        // [0x18][u32le 4][compress=0]['a','b','c']，客户端只从 offset 5 起算：00 61 62 63
         val tiny = FxdynMapInfo.buildBlock(byteArrayOf(0x61, 0x62, 0x63))
         assertArrayEquals(byteArrayOf(0x18, 4, 0, 0, 0, 0, 0x61, 0x62, 0x63), tiny)
         assertEquals(0x024A0126, FxdynMapInfo.ssdStreamChecksum(tiny), "a/b 初值必须为 0")

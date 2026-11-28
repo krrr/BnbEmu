@@ -71,11 +71,8 @@ object ItemDefCatalog {
     fun loadBaseItems(): List<ItemDefEntry> = decodeBlock(DataResource.bytes("data/item_def_base.bin"))
 
     fun decodeBlock(bytes: ByteArray): List<ItemDefEntry> {
-        val buf = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
-        val magic = buf.get().toInt() and 0xFF
-        require(magic == 0x18) { "Invalid SSD magic: 0x${magic.toString(16)}" }
-        buf.short // blockLen
-        buf.get(); buf.get(); buf.get()
+        val plain = unpackSsdBlock(bytes)
+        val buf = ByteBuffer.wrap(plain).order(ByteOrder.LITTLE_ENDIAN)
         val count = buf.short.toInt() and 0xFFFF
         val items = ArrayList<ItemDefEntry>(count)
         for (i in 0 until count) {

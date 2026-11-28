@@ -30,13 +30,12 @@ object Adler32 {
     }
 
     /**
-     * 针对 SSD 数据块的校验和计算 (对应 CA.exe sub_78BB60)。
+     * 针对 SSD 数据块的校验和计算 (对应 CA.exe sub_78C120 -> sub_78BB60)。
      *
      * SSD 块结构:
      * - `[0]`: 0x18 (BLOCK_MARKER)
-     * - `[1..3]`: 24-bit LE 数据区长度 len
-     * - `[4]`: 标志位 (未压缩通常为 0)
-     * - `[5 .. 5+len-1]`: 数据载荷
+     * - `[1..4]`: 32-bit LE 数据区长度 len (u32le)
+     * - `[5 .. 5+len-1]`: 数据载荷（首字节为压缩标志 0/1）
      *
      * 校验从 offset 5 开始，长度为 len。
      */
@@ -46,8 +45,9 @@ object Adler32 {
         }
         val len = (block[1].toInt() and 0xFF) or
                 ((block[2].toInt() and 0xFF) shl 8) or
-                ((block[3].toInt() and 0xFF) shl 16)
-        check(5 + len == block.size) { "SSD 块长度不符: header=$len, size=${block.size}" }
+                ((block[3].toInt() and 0xFF) shl 16) or
+                ((block[4].toInt() and 0xFF) shl 24)
+        check(len >= 0 && 5 + len == block.size) { "SSD 块长度不符: header=$len, size=${block.size}" }
         return computeZero(block, 5, len)
     }
 }

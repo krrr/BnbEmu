@@ -189,8 +189,9 @@ class ShopTest {
         assertEquals(0x18, block[0].toInt() and 0xFF)
         val payloadLen = (block[1].toInt() and 0xFF) or
             ((block[2].toInt() and 0xFF) shl 8) or
-            ((block[3].toInt() and 0xFF) shl 16)
-        assertEquals(block.size - 5, payloadLen, "u24 len 必须等于块长-5")
+            ((block[3].toInt() and 0xFF) shl 16) or
+            ((block[4].toInt() and 0xFF) shl 24)
+        assertEquals(block.size - 5, payloadLen, "u32 len 必须等于块长-5")
         assertEquals(1, block[5].toInt() and 0xFF, "573 条目录可压缩，客户端写盘 compress=1")
 
         val rawSize = (block[6].toInt() and 0xFF) or
@@ -270,6 +271,43 @@ class ShopTest {
         // 也就是与客户端 CShopItemMan 重序列化后写盘的记录表同源。改动 ShopItemEntry.encode 会在这里失败。
         val base = bnbemu.data.DataResource.bytes("data/shop_catalog_base.bin")
         assertArrayEquals(base, ShopCatalogData.buildBlock(ShopCatalogData.loadBaseItems()))
+    }
+
+    @Test
+    fun testSsdBlockLenSupportsFullU32Above64KB() {
+        // 构造超过 65535 字节的商城目录块，验证 4 字节 u32le blockLen 读写与校验和均不截断
+        val baseItems = ShopCatalogData.loadBaseItems()
+        val expanded = baseItems + baseItems.mapIndexed { idx, item -> item.copy(prodId = 90_000_000 + idx) }
+        val block = ShopCatalogData.buildBlock(expanded)
+        assertTrue(block.size > 65_535, "扩充后明文块应大于 64KB，实际 ${block.size} B")
+
+        val headerLen = (block[1].toInt() and 0xFF) or
+            ((block[2].toInt() and 0xFF) shl 8) or
+            ((block[3].toInt() and 0xFF) shl 16) or
+            ((block[4].toInt() and 0xFF) shl 24)
+        assertEquals(block.size - 5, headerLen, "blockLen 必须按 4 字节 u32le 写入完整长度")
+        assertEquals(expanded, ShopCatalogData.decodeBlock(block), ">64KB 块须无损往返")
+        assertEquals(
+            bnbemu.codec.Adler32.computeZero(block, 5, block.size - 5),
+            bnbemu.codec.Adler32.computeSsdBlock(block),
+            "computeSsdBlock 须按 4 字节 u32le 校验 >64KB 块"
+        )
+
+        // 篡改第 4 字节（bit 24..31）必须被 4 字节长度校验拦住
+        val corrupted = block.copyOf()
+        corrupted[4] = 1
+        assertThrows(IllegalStateException::class.java) {
+            bnbemu.codec.Adler32.computeSsdBlock(corrupted)
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            ShopCatalogData.decodeBlock(corrupted)
+        }
+
+        // 同时验证 ItemDefCatalog 压缩/未压缩块均可被 decodeBlock 无损解析
+        val compressedDefs = bnbemu.data.ItemDefCatalog.buildBlock(bnbemu.data.ItemDefCatalog.DEFAULT_ITEMS, compress = true)
+        val rawDefs = bnbemu.data.ItemDefCatalog.buildBlock(bnbemu.data.ItemDefCatalog.DEFAULT_ITEMS, compress = false)
+        assertEquals(bnbemu.data.ItemDefCatalog.DEFAULT_ITEMS, bnbemu.data.ItemDefCatalog.decodeBlock(compressedDefs))
+        assertEquals(bnbemu.data.ItemDefCatalog.DEFAULT_ITEMS, bnbemu.data.ItemDefCatalog.decodeBlock(rawDefs))
     }
 
     @Test
