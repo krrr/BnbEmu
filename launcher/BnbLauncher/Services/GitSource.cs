@@ -9,6 +9,14 @@ namespace BnbLauncher.Services;
 /// <summary>工作区状态：有没有未提交改动，以及这些改动的内容指纹。</summary>
 public readonly record struct WorkTreeState(bool Dirty, string Fingerprint);
 
+/// <summary>resource 子模块的本地状态：父仓库当前 HEAD pin 的提交 vs 子模块本地当前提交。</summary>
+public readonly record struct ResourceSubmoduleInfo(string? PinnedSha, string? LocalSha)
+{
+    public bool IsOutdated => !string.IsNullOrEmpty(PinnedSha)
+                              && !string.IsNullOrEmpty(LocalSha)
+                              && !string.Equals(PinnedSha, LocalSha, StringComparison.OrdinalIgnoreCase);
+}
+
 /// <summary>检查更新的结果。</summary>
 public sealed class SourceStatus
 {
@@ -580,37 +588,39 @@ public static class GitSource
     }
 
     /// <summary>
-    /// resource 子模块的工作区提交是否和源码 pin 的不一致（作者推了新资源，比如客户端补丁）。
-    /// 只看本地提交号，不联网；宁可漏判也不误判成"需要重下"，所以目录不是正经仓库时一律返回 false。
+    /// 读取父仓库 HEAD 对 <c>resource</c> 子模块 pin 的提交，以及子模块工作区当前所在提交。
+    /// 只看本地仓库，不联网；目录不可读时对应字段返回 null。
     /// </summary>
-    public static bool SubmoduleOutdated()
+    public static ResourceSubmoduleInfo ReadResourceSubmodule()
     {
         try
         {
-            if (!Exists) return false;
+            if (!Exists) return default;
 
             using var repo = new Repository(AppPaths.SourceDir);
             var sub = repo.Submodules["resource"];
-            if (sub is null) return false;
+            if (sub is null) return default;
 
-            var want = sub.HeadCommitId ?? sub.IndexCommitId;
-            if (want is null) return false;
-
+            var want = (sub.HeadCommitId ?? sub.IndexCommitId)?.Sha;
             var target = Path.IsPathRooted(sub.Path) ? sub.Path : Path.Combine(AppPaths.SourceDir, sub.Path);
-            if (!TryOpenRepository(target, out var subRepo)) return false;
+            if (!TryOpenRepository(target, out var subRepo)) return new ResourceSubmoduleInfo(want, null);
 
             using (subRepo)
             {
-                var have = subRepo.Head.Tip?.Sha;
-                return have is not null && have != want.Sha;
+                return new ResourceSubmoduleInfo(want, subRepo.Head.Tip?.Sha);
             }
         }
         catch
         {
-            // 判断失败就当作不需要同步，别因此挡住启动
-            return false;
+            return default;
         }
     }
+
+    /// <summary>
+    /// resource 子模块的工作区提交是否和源码 pin 的不一致（作者推了新资源，比如客户端补丁）。
+    /// 只看本地提交号，不联网；宁可漏判也不误判成"需要重下"，所以目录不是正经仓库时一律返回 false。
+    /// </summary>
+    public static bool SubmoduleOutdated() => ReadResourceSubmodule().IsOutdated;
 
     /// <summary>打开目录里那个仓库（只认目录下的 .git，不往上找，避免误开成父仓库）。</summary>
     private static bool TryOpenRepository(string path, out Repository repo)

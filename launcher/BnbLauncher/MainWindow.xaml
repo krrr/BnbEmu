@@ -426,20 +426,51 @@
                                    ToolTip="{Binding ClientDetail}" />
                     </StackPanel>
 
-                    <Button Grid.Column="1" Content="{Binding ClientButtonText}" MinWidth="108" Margin="12,0,0,0"
-                            HorizontalAlignment="Right" VerticalAlignment="Center"
-                            Command="{Binding LaunchClientCommand}"
-                            Style="{StaticResource PrimaryButton}">
-                        <Button.ToolTip>
-                            <ToolTip Style="{StaticResource HintToolTip}" Placement="Top">
-                                <StackPanel>
-                                    <TextBlock Text="Launch Client" FontWeight="SemiBold" />
-                                    <TextBlock Text="On first run the client folder is prepared first (pull the resource submodule, copy exe/dll, pack resources), then CA.exe is launched."
-                                               TextWrapping="Wrap" Opacity="0.72" Margin="0,3,0,0" />
-                                </StackPanel>
-                            </ToolTip>
-                        </Button.ToolTip>
-                    </Button>
+                    <StackPanel Grid.Column="1" Orientation="Horizontal" Margin="10,0,0,0"
+                                HorizontalAlignment="Right" VerticalAlignment="Center">
+                        <Button Content="Update" MinWidth="74" Margin="0,0,8,0"
+                                Style="{StaticResource PrimaryButton}"
+                                Command="{Binding ReinstallClientCommand}"
+                                Visibility="{Binding ClientUpdateVisibility}">
+                            <Button.ToolTip>
+                                <ToolTip Style="{StaticResource HintToolTip}" Placement="Top">
+                                    <StackPanel>
+                                        <TextBlock Text="Update client" FontWeight="SemiBold" />
+                                        <TextBlock Text="Syncs resource to the source gitlink and rebuilds runtime\client (copies CA.exe and packs idd/idx)."
+                                                   TextWrapping="Wrap" Opacity="0.72" Margin="0,3,0,0" />
+                                    </StackPanel>
+                                </ToolTip>
+                            </Button.ToolTip>
+                        </Button>
+
+                        <Button Content="{Binding ClientButtonText}"
+                                Command="{Binding LaunchClientCommand}">
+                            <Button.Style>
+                                <Style TargetType="Button" BasedOn="{StaticResource SecondaryButton}">
+                                    <Setter Property="MinWidth" Value="74" />
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding IsClientOutdated}" Value="False">
+                                            <Setter Property="MinWidth" Value="108" />
+                                            <Setter Property="Background" Value="{StaticResource AccentBrush}" />
+                                            <Setter Property="BorderBrush" Value="{StaticResource AccentDarkBrush}" />
+                                            <Setter Property="Template" Value="{StaticResource PrimaryButtonTemplate}" />
+                                            <Setter Property="Foreground" Value="White" />
+                                            <Setter Property="FontWeight" Value="SemiBold" />
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </Button.Style>
+                            <Button.ToolTip>
+                                <ToolTip Style="{StaticResource HintToolTip}" Placement="Top">
+                                    <StackPanel>
+                                        <TextBlock Text="Launch Client" FontWeight="SemiBold" />
+                                        <TextBlock Text="On first run the client folder is prepared first (pull the resource submodule, copy exe/dll, pack resources), then CA.exe is launched."
+                                                   TextWrapping="Wrap" Opacity="0.72" Margin="0,3,0,0" />
+                                    </StackPanel>
+                                </ToolTip>
+                            </Button.ToolTip>
+                        </Button>
+                    </StackPanel>
                 </Grid>
             </Border>
         </Grid>

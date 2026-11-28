@@ -82,6 +82,9 @@ public enum ClientState
     /// <summary>一切就绪，可以点启动。</summary>
     Ready,
 
+    /// <summary>已有客户端可启动，但父仓库 pin 的 resource 子模块提交已更新。</summary>
+    Outdated,
+
     /// <summary>客户端进程在跑。</summary>
     Running,
 }
@@ -135,6 +138,8 @@ public sealed class MainViewModel : ObservableObject
     private CancellationTokenSource? _buildCts;
     private ClientState _clientState = ClientState.NotPrepared;
     private int _clientPid;
+    private ClientResourceStatus _clientResourceStatus;
+    private string? _loggedClientOutdatedSha;
     private bool _autoScroll = true;
 
     public MainViewModel()
@@ -391,17 +396,22 @@ public sealed class MainViewModel : ObservableObject
             OnPropertyChanged(nameof(ClientBadgeFg));
             OnPropertyChanged(nameof(ClientButtonText));
             OnPropertyChanged(nameof(IsClientRunning));
+            OnPropertyChanged(nameof(IsClientOutdated));
+            OnPropertyChanged(nameof(ClientUpdateVisibility));
             OnPropertyChanged(nameof(CanLaunchClient));
             CommandManager.InvalidateRequerySuggested();
         }
     }
 
     public bool IsClientRunning => ClientState == ClientState.Running;
+    public bool IsClientOutdated => ClientState == ClientState.Outdated;
+    public Visibility ClientUpdateVisibility => IsClientOutdated ? Visibility.Visible : Visibility.Collapsed;
 
     public string ClientText => ClientState switch
     {
         ClientState.Preparing => "Preparing client…",
         ClientState.Running => $"Client running · PID {_clientPid}",
+        ClientState.Outdated => "Client outdated",
         ClientState.Ready => "Client ready",
         _ => "Client not prepared",
     };
@@ -410,6 +420,7 @@ public sealed class MainViewModel : ObservableObject
     public string ClientDetail => ClientState switch
     {
         ClientState.Preparing => "Pulling the resource submodule, copying files and packing resources; the first run can take a few minutes",
+        ClientState.Outdated => DescribeOutdatedClient(),
         ClientState.Ready or ClientState.Running => DescribeClientFiles(),
         _ => !AppPaths.SourceExists
             ? "The client can be prepared once the source is ready"
@@ -417,6 +428,18 @@ public sealed class MainViewModel : ObservableObject
                 ? "Click \"Launch Client\" to copy the program files and pack the resources automatically"
                 : "Initial launch downloads large client assets",
     };
+
+    private string DescribeOutdatedClient()
+    {
+        var have = ShortSha(_clientResourceStatus.HaveSha);
+        var want = ShortSha(_clientResourceStatus.WantSha);
+        return have is not null && want is not null
+            ? $"{have} → {want}"
+            : "Resources outdated";
+    }
+
+    private static string? ShortSha(string? sha)
+        => string.IsNullOrEmpty(sha) ? null : sha.Length > 7 ? sha[..7] : sha;
 
     private static string DescribeClientFiles()
     {
@@ -432,7 +455,7 @@ public sealed class MainViewModel : ObservableObject
         // Ready 用主题蓝而不是绿：Running 已经占了绿，两态同色就分不出来了；
         // 这里是整个界面里唯一一处「主题色出现在状态点上」，跟着 AccentBrush 一起换。
         ClientState.Ready => Ui.Brush("#1D74D8"),
-        ClientState.Preparing => Ui.Brush("#F59E0B"),
+        ClientState.Preparing or ClientState.Outdated => Ui.Brush("#F59E0B"),
         _ => Ui.Brush("#9CA3AF"),
     };
 
@@ -440,6 +463,7 @@ public sealed class MainViewModel : ObservableObject
     public string ClientBadgeText => ClientState switch
     {
         ClientState.Preparing => "Preparing",
+        ClientState.Outdated => "Update available",
         ClientState.Ready => "Ready",
         ClientState.Running => "Running",
         _ => "Missing",
@@ -448,7 +472,7 @@ public sealed class MainViewModel : ObservableObject
     public Brush ClientBadgeBg => ClientState switch
     {
         ClientState.Ready or ClientState.Running => Ui.Brush("#DCFCE7"),
-        ClientState.Preparing => Ui.Brush("#FEF3C7"),
+        ClientState.Preparing or ClientState.Outdated => Ui.Brush("#FEF3C7"),
         _ => Ui.Brush("#F3F4F6"),
     };
 
@@ -456,6 +480,7 @@ public sealed class MainViewModel : ObservableObject
     {
         ClientState.Ready or ClientState.Running => Ui.Brush("#15803D"),
         ClientState.Preparing => Ui.Brush("#B45309"),
+        ClientState.Outdated => Ui.Brush("#92400E"),
         _ => Ui.Brush("#6B7280"),
     };
 
@@ -463,12 +488,14 @@ public sealed class MainViewModel : ObservableObject
     {
         ClientState.Preparing => "Preparing…",
         ClientState.Running => "Running",
+        ClientState.Outdated => "Launch",
         _ => "Launch Client",
     };
 
-    // 未准备时也允许点：点下去先准备（首次会拉子模块 + 打包），准备完再启动
+    // 未准备时也允许点：点下去先准备（首次会拉子模块 + 打包），准备完再启动；
+    // Outdated 时不自动更新，仍允许直接启动当前客户端。
     public bool CanLaunchClient => !IsBusy && !IsUpdateRequired && AppPaths.SourceExists
-                                   && ClientState is ClientState.NotPrepared or ClientState.Ready;
+                                   && ClientState is ClientState.NotPrepared or ClientState.Ready or ClientState.Outdated;
 
     // 收紧到 Stopped：Stopping 期间 StopAsync 还没释放 _proc，此时放行启动会造成进程引用错乱。
     // 强制更新期间也不放行：旧版引导流程可能已经跟服务端对不上了。
@@ -1407,7 +1434,33 @@ public sealed class MainViewModel : ObservableObject
         else if (settle || ClientState != ClientState.Preparing)
         {
             _clientPid = 0;
-            ClientState = ClientProvisioner.IsPrepared ? ClientState.Ready : ClientState.NotPrepared;
+            if (!ClientProvisioner.IsPrepared)
+            {
+                _clientResourceStatus = default;
+                _loggedClientOutdatedSha = null;
+                ClientState = ClientState.NotPrepared;
+            }
+            else
+            {
+                _clientResourceStatus = ClientProvisioner.CheckOutdated();
+                if (_clientResourceStatus.IsOutdated)
+                {
+                    ClientState = ClientState.Outdated;
+                    if (!string.IsNullOrEmpty(_clientResourceStatus.WantSha) &&
+                        !string.Equals(_loggedClientOutdatedSha, _clientResourceStatus.WantSha, StringComparison.OrdinalIgnoreCase))
+                    {
+                        _loggedClientOutdatedSha = _clientResourceStatus.WantSha;
+                        var have = ShortSha(_clientResourceStatus.HaveSha) ?? "?";
+                        var want = ShortSha(_clientResourceStatus.WantSha)!;
+                        _log.Warn("CLIENT", $"Client resources are outdated ({have} → {want}); click \"Update\" to rebuild");
+                    }
+                }
+                else
+                {
+                    _loggedClientOutdatedSha = null;
+                    ClientState = ClientState.Ready;
+                }
+            }
         }
 
         // 状态没变时上面的 setter 不发通知，但资源包体积这类派生文案还得跟着刷

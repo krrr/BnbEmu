@@ -5,6 +5,9 @@ using BnbLauncher.Models;
 
 namespace BnbLauncher.Services;
 
+/// <summary>客户端资源与父仓库 gitlink 的对比结论。</summary>
+public readonly record struct ClientResourceStatus(bool IsOutdated, string? HaveSha, string? WantSha);
+
 /// <summary>
 /// 客户端（CA.exe）的落地与启动。
 ///
@@ -32,6 +35,12 @@ public sealed class ClientProvisioner
     public static readonly string[] ArchiveNames = ["fx", "CharTE", "EmoTE"];
 
     private const string StampFileName = "idd-stamps.json";
+    private const string ClientStampFileName = "client-stamp.json";
+
+    private sealed class ClientBuildStamp
+    {
+        public string? ResourceSha { get; set; }
+    }
 
     private readonly LogBus _log;
     private Process? _client;
@@ -107,6 +116,34 @@ public sealed class ClientProvisioner
         return sum;
     }
 
+    /// <summary>
+    /// 对比当前客户端与父仓库 gitlink：只要子模块工作区还没跟上父仓库 pin 的提交，
+    /// 或者上次打包记录的 resource 提交与父仓库 pin 的不一致，就视为已过期。
+    /// 只看本地状态、不联网。
+    /// </summary>
+    public static ClientResourceStatus CheckOutdated()
+    {
+        if (!IsPrepared) return default;
+
+        var sub = GitSource.ReadResourceSubmodule();
+        if (string.IsNullOrEmpty(sub.PinnedSha)) return default;
+
+        var builtSha = LoadClientStamp()?.ResourceSha;
+
+        if (sub.IsOutdated)
+        {
+            return new ClientResourceStatus(true, builtSha ?? sub.LocalSha, sub.PinnedSha);
+        }
+
+        if (!string.IsNullOrEmpty(builtSha) &&
+            !string.Equals(builtSha, sub.PinnedSha, StringComparison.OrdinalIgnoreCase))
+        {
+            return new ClientResourceStatus(true, builtSha, sub.PinnedSha);
+        }
+
+        return new ClientResourceStatus(false, builtSha ?? sub.LocalSha, sub.PinnedSha);
+    }
+
     // ── 准备客户端目录 ──────────────────────────────────────────────────
 
     /// <summary>
@@ -167,6 +204,9 @@ public sealed class ClientProvisioner
 
         // 4) 资源包
         await Task.Run(() => BuildArchives(progress, forceReinstall, ct), ct);
+
+        // 5) 记录本次构建对应的 resource 提交，用于后续与父仓库 gitlink 对账
+        SaveClientStamp();
     }
 
     /// <summary>清空整个客户端目录，确保残留文件/旧版 exe/旧 idd 全部清干净。</summary>
@@ -339,6 +379,39 @@ public sealed class ClientProvisioner
         catch
         {
             // 记不住指纹最多下次重新打包，不影响启动
+        }
+    }
+
+    private static ClientBuildStamp? LoadClientStamp()
+    {
+        var path = Path.Combine(AppPaths.ClientDir, ClientStampFileName);
+        try
+        {
+            if (!File.Exists(path)) return null;
+            return JsonSerializer.Deserialize<ClientBuildStamp>(File.ReadAllText(path));
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static void SaveClientStamp()
+    {
+        var sub = GitSource.ReadResourceSubmodule();
+        var sha = sub.LocalSha ?? sub.PinnedSha;
+        if (string.IsNullOrEmpty(sha)) return;
+
+        try
+        {
+            Directory.CreateDirectory(AppPaths.ClientDir);
+            File.WriteAllText(Path.Combine(AppPaths.ClientDir, ClientStampFileName),
+                JsonSerializer.Serialize(new ClientBuildStamp { ResourceSha = sha },
+                    new JsonSerializerOptions { WriteIndented = true }));
+        }
+        catch
+        {
+            // 写不进不影响启动，最多下次按子模块状态判断
         }
     }
 
