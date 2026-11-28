@@ -48,7 +48,7 @@
     前置窗口放宽到 320B 复核 `mov reg,0x50 → push reg` 形式仍无第三处。
   - 两者分别是 `sub_5D5CBA`（虚表 `0x008AF174`）与 `sub_631C78`（虚表 `0x008B441C`）的
     **op 97 case**；两张虚表槽位一一对应，是同一舞台基类的两套平行商城舞台实现。
-  - `sub_4F748F` 全二进制只有 4 个调用者：这 2 个发 op 80，另 2 个（`sub_5D1106` /
+  - `sub_4F748F` 全二进制只有 4 个调用者：这 2 个发 op 80，另 2 个（`CShopStage_OnEnter` /
     `sub_6300BD`）是这两套舞台的构造/初始化，不发。
   ⇒ op 80 的语义是「**收到 S→C op 97 且目标 stage 是房间舞台(12/16/17/18) 时的会话回报**」，
   任何 ChangeStage 回房间的路径都会发；商城退出只是目前服务端会触发的那一条。
@@ -66,3 +66,26 @@
   - 空表块恒为 `18 03 00 00 00 00 00 00`，所以抓包里 op 66 与 op 204 除 opcode 外逐字节相同。
   - ⚠️ 空表落盘 `adler32Zero(体) = 0`，而 `sub_670D66` / `sub_670E05` 要求版本号非 0，客户端每次进商城
     都会重发 258/278 再要一次缓存——预期行为，服务端必须每次回包。
+- **商城角色预览/选角只认部分 id（进商城变 Dao 的根因，2026-11-25）**：
+  `CShopStage_OnEnter`（`0x5D1106`）先用 `CUserDynamicInfo_GetBomber`（`0x6E50F0`）读出本机
+  当前角色，写入 `[shop+0x2F5C]`（=12124），随后 `CShopStage_SelectBomber`（`0x5CEA57`，
+  选角/初始化，`Shop/S_DlgSelecChar`）和 `CShopStage_SetBomberPreview`（`0x5CE3D4`，
+  预览模型：`412*id + CBomberAttr + 0x6C` 资源组路径）都会做白名单：
+  - `CBomberAttr_IsNormalBomber`（`0x519680`）= `0 <= id < CBomberAttr_GetNormalBomberLimit()`，
+    运行时实测 `CBomberAttr_GetNormalBomberLimit`（`0x4D65D3`）=
+    `32 - 10(cat3) - 9(cat2) - 0(cat1) - 2(cat4) = 11` → **0..10**；
+  - `CBomberAttr_IsSkinBomber`（`0x51969C`）= `[10, 10 + 9)` → **10..18**。
+  两者都不命中时，`CShopStage_SelectBomber` 把 `v3` 清 0、`CShopStage_SetBomberPreview`
+  回退 `[shop+0x773C]`（初始 0 = Dao）。
+  于是 **id 19（C22，attr 分类 5）和 20..31 在商城里一律显示 Dao**；8/9 因 `<11` 反而正常，
+  10..18 因落在皮肤区正常。`CUserDynamicInfo_SetBomber`（`0x6E4BAB`）写进 CUDI 的仍是真实 id，
+  而「我的角色」/名片走 `sub_672024`（>7 原样返回）读 CUDI，所以名片显示正常——这就是
+  「只有商城坏、状态没改」的来源。
+  - 客户端补丁 `tools/client/patch_shop_char.py`：两处判定改成 `0 <= id < 32`（保留 0..7 的
+    角色卡映射与非法 id 的兜底），VA `0x5CE3E2`（26B）/ `0x5CEAA0`（15B），备份 `CA.exe.shopbak`。
+  - ⚠️ 打 `0x5CEAA0` 时必须补 `add esp, 4`：原 `call CBomberAttr_IsSkinBomber` 的 `ret 4`
+    会吃掉 `0x5CEA88` 的 `push edi`；直接 NOP 掉调用会让 SEH 收尾（`0x71DC24` 的
+    pop edi/esi/ebx）整体错位，返回时 EBX=0，调用方 `CShopStage_OnEnter` 紧接着
+    `CShopStage_ApplyBomber(this=0)` 必崩（实测崩在 `0x46BFE1`，`this=0x3520 = 0x2F74+0x5AC`）。
+  - 个人交易市场有同构代码（预览 `sub_6A7823` @ `0x6A7831`，选角 `sub_6A7B99` @ `0x6A7BDC`），
+    目前未纳入补丁；若市场同样变 Dao，按相同思路处理（同样注意栈平衡）。

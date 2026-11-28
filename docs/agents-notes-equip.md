@@ -1,3 +1,5 @@
+- **个人名片与玩家详细资料界面（My Page / op 301, op 73, op 66, op 74, op 273, op 288 SweetieInfoReq）**：参见 `UserInfoReq.kt` + `UserRestrictReq.kt` + `SweetieInfoReq.kt`。
+- **玩家换装/装备穿戴变更同步请求（C→S op 273 **：参见ChangeEquipReq.kt
 - **装备槽位编码与「回大厅装备被自动脱掉」的坑**：
     - op 273 的 `E1(equipSlot)` 是**复合槽位 = 24 × 装备大类 + 子槽位**
       （`sub_65C81A` 557216 写入槽项 +116，即物品 +84；`sub_659004` 553095 原样发回。

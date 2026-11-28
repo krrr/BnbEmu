@@ -153,15 +153,17 @@ body 首个 u32 == 0x68      # 0x439730 逐 u32 读出，读取时流内校验�
 
 ```
 0x00 73 73 69 31              "ssi1" 魔数
-0x04 aa 08 ba b3              未知（时间戳/随机；csysstr.ssd 等同格式文件亦然）
-0x08 18 29 00 00              未知
-0x0C 00 00 01 06 00 00 00     ┐ u32 长度前缀字符串（推断）
-0x13 "PopTag"                 ┘
-0x19 0b 00 00 00 "Main Server"  服务器名
-0x28 00 00 00 00 01 00        条目元数据（推断）
-0x2E 42 87 13 07              ★ IPv4 大端 = 66.135.19.7（补丁点）
-0x32 fe 0e                    端口 u16 小端 = 3838
-0x34 00 00                    尾部
+0x04 aa 08 ba b3              Adler-32 变体（a/b 初值 0），覆盖 0x08 之后全部字节
+0x08 18 29 00 00 00           SSD 块头 [0x18][u32 LE 41][compress=0]
+0x0E 01                       info 流: mCnt = 1
+0x0F 06 00 00 00 "PopTag"     strName（服务器组名，登录界面下拉框文本）
+0x19 0b 00 00 00 "Main Server"  strIp 栏原文是显示文案，**不是 IP**
+0x28 00 00 00 00              dwParam
+0x2C 01 00                    lCnt = 1（登录服务器条数，u16 LE）
+0x2E 42 87 13 07              ★ IPv4 顺序字节 = 66.135.19.7（补丁点）
+0x32 fe 0e                    端口 u16 LE = 3838
+0x34 00                       nFlag
+0x35 00                       currentServer
 ```
 
 来源：登录后服务器 **op1 MultiServerInit** 下发列表 → 客户端写回（0x6CDA60 一带）；
@@ -169,10 +171,19 @@ body 首个 u32 == 0x68      # 0x439730 逐 u32 读出，读取时流内校验�
 所以长期方案是在模拟器 op1 里给正确地址，改这个文件只是临时手段（本补丁脚本会一并改掉它）。
 
 > 2026-08-30 更新：op1 MultiServerInit 的 54B 载荷结构已逆向（`Encode1Bool(true) + Encode4(46) +
-> 46B SSD 资料块`，资料块变换 = 每 dword BE 读 ^ 0x96CA5395 后 LE 写回，解码即 multisvr.ssd 缓存体，
-> IPv4 在解码偏移 38–42）。模拟器侧已在 `packet/MultiServerInit.kt` 的 EN_MULTISVR_BLOB 内把
-> IP 硬编码为 127.0.0.1:3838——**改地址要同时改这里和 tools/patch_ip.py 覆盖的客户端补丁点**，
-> 重新生成用 `tools/extract_first_push.py --ip <ip>`。详见 AGENTS.md「SSD 资料块编码」一节。
+> 46B SSD 资料块`，资料块变换 = 每 dword BE 读 ^ 0x96CA5395 后 LE 写回，解码即 multisvr.ssd 缓存体）。
+>
+> 2026-11-18 修正 + 程序化：上面的表头逐字节复核后修正了几处误读 ——
+> ① SSD 块头只有 6 B（`[0x18][u32 LE 41][compress=0]`），字符串的 u32 长度前缀从 0x0F 起算，
+> 不是「u32 0 + 名字」；② IPv4 是**顺序 4 字节**（0x2E..0x31，解码偏移 38..41），
+> 前面那句「38–42」多算了一个字节；③ `"Main Server"` 是 `strIp` 栏的显示文案，客户端不用它连服务器
+> （连接地址只取 login 表的 4B IPv4 + port）；④ 载荷末字节 `5A` 是第二个 `Encode1(0)`，
+> 含义是「不带 multisvrn.ssd 公告块」，与块内尾部编码的 `a5 69` 是两回事。
+> 模拟器侧已改为**结构化生成**：`packet/MultiServerInit.kt` 的 `EN_MULTI_SERVERS` / `EN_LOGIN_SERVERS` /
+> `EN_CURRENT_SERVER` 产出 info 流 → `buildSsdBlock` → `ssdEncode`，用抓包 IP 重建时与
+> `cap/firstconn_s2c_op1.bin` 逐字节一致（回归 `MultiServerInitTest`）；默认表把 IP 换成 127.0.0.1:3838，
+> **改地址只需改 `EN_LOGIN_SERVERS`，并同步 `tools/client/patch_ip.py` 覆盖的客户端补丁点**。
+> 详见 AGENTS.md「SSD 资料块编码」一节。
 
 ## 6. NMDATA\Server.cfg 现状
 
@@ -180,22 +191,43 @@ body 首个 u32 == 0x68      # 0x439730 逐 u32 读出，读取时流内校验�
 即使按 ssi3 重新生成（需复刻 0x43DCC0 校验算法），影响面也只有 NMCOSrv 的 33567 会话列表。
 处理策略：**忽略即可**（补丁脚本为一致性起见会把文本里的 IP 一并替换）。
 
-## 7. tools/patch_ip.py 使用说明
+## 7. tools/client/patch_ip.py 使用说明
 
 ```
-python tools/patch_ip.py                    # 把 F:\Games\PopTag 里所有 66.135.19.7 → 127.0.0.1
-python tools/patch_ip.py --ip 192.168.1.10  # 指定其他地址（二进制槽位要求长度 ≤ 11）
-python tools/patch_ip.py --game-dir D:\xx   # 指定游戏目录
-python tools/patch_ip.py --dry-run          # 只预览将要做的修改
-python tools/patch_ip.py --scan-only        # 全目录扫描旧 IP 残留（跳过 *.ipbak）
-python tools/patch_ip.py --restore          # 从 *.ipbak 备份还原全部文件
+python tools/client/patch_ip.py --ip 192.168.50.4      # 把 F:\Games\PopTag 里所有 127.0.0.1 → 192.168.50.4
+python tools/client/patch_ip.py --ip 127.0.0.1 --old-ip 192.168.50.4
+                                                       # 改回本机（旧地址不再固定为 66.135.19.7）
+python tools/client/patch_ip.py --ip 1.2.3.4 --old-ip 66.135.19.7
+                                                       # 从破解版原始状态直接补丁
+python tools/client/patch_ip.py --game-dir D:\xx --ip 192.168.50.4   # 指定游戏目录（须含 CA.exe）
+python tools/client/patch_ip.py --dry-run --ip 192.168.50.4          # 只预览将要做的修改
+python tools/client/patch_ip.py --scan-only           # 全目录扫描旧 IP 残留（跳过 *.ipbak）
+python tools/client/patch_ip.py --restore             # 从 *.ipbak 备份还原全部文件
 ```
 
+- **旧 IP 默认值已改为 127.0.0.1**（客户端现状；破解版原值 66.135.19.7 需用 `--old-ip` 显式指定）。
+  旧 IP 与新 IP 相同时脚本只提示不动文件。
 - 首次打补丁前自动生成 `<file>.ipbak` 原始备份（已存在则不覆盖，永远保存最初版本）。
-- 二进制 ASCII 槽位按「等长 + `\0` 填充」替换，不移动任何字节、不破坏指针/对齐。
+- 二进制槽位是原版**定长 IPv4 槽**：ASCII 16B（15 字符 + NUL）、UTF-16LE 32B（15 字符 + NUL）。
+  破解版把原版 15 字符地址写短后，槽尾那截本就是**填充 NUL**，所以新地址比旧的长时直接从这些
+  零里借（借多少补多少，借到的必须是零），替换前后总字节数不变，不移动任何字节、不破坏
+  指针/对齐；15 字符以内的任意 IPv4 都能打进去，不再要求"不能比旧 IP 长"。
+  （2026-11-17 修正：此前按 `len(新) > len(旧)` 直接拒绝，把 `192.168.50.4` 这种 12 字符地址
+  误判为超长。）
+- 唯一的例外是紧贴下一个字符串的窄槽：NMCOSrv.exe 的 invite 回退点位（file 441152）槽内只有
+  12B（9 字符的 `127.0.0.1` + 3 个 NUL，后面紧跟 `"local"`），只容得下 ≤11 字符地址；更长时脚本
+  打印跳过原因并保留原值，该点位只影响 NMCO invite 的连接类型日志，不参与登录/进频道。
+  nmconew.dll / nmcogame.dll 的 UTF-16 表里另有几个破解者自带的窄测试槽，15 字符地址同样会跳过它们。
+- 重复跑是安全的：已是目标地址的点位打印"已是 xxx，无需修改"。
+- 残留扫描只在 `*.ssd` 里查网络序 4 字节（素材包里 `7f 00 00 01` 纯属巧合），
+  并跳过 >64MiB 的 `.idd` 素材包。
 - multisvr.ssd 在偏移 0x2E 按网络序替换 4 字节 IP（端口 3838 不动）。
 - 该文件也会被服务器 op1 覆盖；若私服下发列表仍是旧 IP，重新登录后需再跑一次本脚本，
   或直接在模拟器 EN_0 的 MultiServerInit 里配置新地址。
+- **局域网（客户端在另一台机器）必须两端一起改**：客户端二进制/multisvr.ssd 换成本机 LAN IP 之外，
+  模拟器侧 `packet/MultiServerInit.kt` 的 `EN_LOGIN_SERVERS`（`LoginServerEntry.ip`）与
+  `packet/ChannelsExtraInfo.kt` 的 `ChannelEntry.ip` 也得是同一个 IP，否则客户端
+  一登录就被服务端下发的 127.0.0.1 覆盖缓存，下次启动仍连本机。
 
 ## 8. 补丁点速查表（改地址 = 改这些）
 
@@ -207,4 +239,4 @@ python tools/patch_ip.py --restore          # 从 *.ipbak 备份还原全部文�
 | multisvr.ssd | 0x2E | u32 网络序 | 服务器列表缓存（会被 op1 覆盖） |
 | NMDATA\Server.cfg | 全文 | 文本 | 实际不生效，仅一致性 |
 
-还原：删除/还原 `.ipbak`，或 `python tools/patch_ip.py --restore`。
+还原：删除/还原 `.ipbak`，或 `python tools/client/patch_ip.py --restore`。

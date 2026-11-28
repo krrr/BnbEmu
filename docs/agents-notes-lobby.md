@@ -77,3 +77,5 @@
   - 结论：body 固定 6B = `E1(result) E1(flag) E2(房号) E1(房型) E1(state)`，
     抓包 `5a 5a a5 22 55 5a` = 0/0/75/15/0。实现见 `packet/EnterSessionResult.kt`，
     回归见 `src/test/kotlin/bnbemu/netty/EnterSessionResultTest.kt`。
+
+- **大厅聊天（C→S op 18）**：参见 `handler/lobby/ChatMsg.kt`（客户端发送 `E1(chatType) + E1(1) + DecodeTokenStr(文字)`；S→C 显示聊天 opcode 尚未确定）。

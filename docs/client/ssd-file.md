@@ -23,7 +23,7 @@
   ⚠ 长度是**完整 u32**（客户端 `sub_78C120`（`CA.exe.c:748271`）直接 `*(DWORD*)(a2+1)` 读），
   只是块都小于 16 MB 所以高字节恒为 0；旧文写作「u24 + u8 0」把同一字段拆成了两段。
   ⚠ 旧版本此处写作「dword 字节序逆转 + 异或 `0x96CA5395` 加密」有误：那是**服务端网络下发** SSD 资料块时
-  的编码（见 `tools/extract_first_push.py` 的 `ssd_decode` / AGENTS.md 的 SSD 资料块章节），
+  的编码（见 `SsdCodec.kt` 的 `ssdEncode`/`buildSsdBlock`/`zlibCompress` 与 `tools/extract_first_push.py` 的 `ssd_decode`），
   客户端解码后才写盘；本地 `.ssd` 与之不是同一种字节形态，混用会解出乱码。
   该网络变换是 **4/2/1 三档**而不是「整块按 dword」：4 B 一组 BE 读 ^ `0x96CA5395` 按 LE 写回，
   余 2 B BE 读 ^ `0xA569`，余 1 B ^ `0x5A`（客户端 `sub_75DAF0`，`CA.exe.c:709349`）。
@@ -109,7 +109,7 @@ JSON 是 YAML 1.2 子集，现有 kaml 可直接解析，**未新增依赖**。
 | `filterstr.ssd` | `CCurseFilter` 敏感词库 | 聊天与起名的屏蔽词列表 | 首连推送 S→C op 51 (`CurseFilterTable`) |
 | `csysstr.ssd` | `CStringMan` 系统字串字典 | 运营可热更文案（38 条 key→文本：任务/角色名/频道描述/tooltip/聊天模板） | 首连推送 S→C op 2 (`FirstInfoInit`) |
 | `fxdynmapinfo.ssd` | `CDynamicMapMan` | 动态地图配置（活动地图属性、分组） | 进频道握手 S→C op 210 无条件推送（2026-11-04 正名 `DynamicMapInfo`，旧名 `EnableShop`；内容由 JSON 实时生成） |
-| `channel2_000.ssd` | 频道列表缓存 | 各频道 ID、状态与人数上限 | 进频道连线 S→C op 11 |
+| `channel2_000.ssd` | 频道列表缓存 | 各频道 ID、状态与人数上限 | 进频道连线 S→C op 11 (`ChannelsExtraInfo`)；状态/开关配套 S→C op 13 (`ChannelsState`) |
 | **`fxdynimginfo.ssd`** | `CDynamicImgInfo` | **动态广告与运营图像信息表** | **由握手 Banner 中的 `55` 控制版本** |
 
 #### (4.1) `filterstr.ssd` 词条流
@@ -159,6 +159,13 @@ Kotlin 侧自 2026-11-22 起**程序化生成**，不再有 1854 B hex 常量：
 `data/CsysStr.kt` 的 `EN_SYS_STR`（38 条）→ `serializePlain` → `buildSsdBlock(compress = false)` → `ssdEncode`；
 `packet/FirstInfoInit.kt` 只写 `Encode1Bool/Encode4/EncodeBuffer` 三个字段。
 回归 `CsysStrPacketTest` 断言明文 1848 B / 块 1854 B / 包体 1859 B 与 `cap/firstconn_s2c_op2.bin` 逐字节一致。
+
+#### (4.3) 选区 / 频道与公告块（op 1 / op 11 / op 13 / op 12）
+
+- **op 1 `MultiServerInit`（`multisvr.ssd`，`packet/MultiServerInit.kt`）**：登录服务器地址表。`EN_MULTI_SERVERS` / `EN_LOGIN_SERVERS` 定义组名与登录 IP/端口；模拟器已将 `EN_LOGIN_SERVERS[].ip` 改为 `127.0.0.1`。
+- **op 11 `ChannelsExtraInfo`（`channel2_000.ssd`，`packet/ChannelsExtraInfo.kt`）与 op 13 `ChannelsState`（`packet/ChannelsState.kt`）**：均已结构化，共用频道表 `EN_CHANNELS`（`ChannelEntry`）。op 11 下发频道名、上限、`channelGrade`、`mapNo` 与 `ChannelEntry.ip`（已改为 `127.0.0.1`），op 13 读取各条目的 `state` 与 `enabled` 栏下发实时状态/开关。两者块头均为 `[0x18][(块长-5)&0xFF][u32 0][u16 LE 频道数]`；op 11 封包带 `Encode1Bool(true) + Encode4(len)`，op 13 无 `Encode1Bool` 前缀、直接 `Encode4(len)`。
+- **op 12 `ChannelsNotice`（`packet/ChannelsNotice.kt`）**：频道选择界面的公告横幅、PPL 广告与滚动系统公告，无 `Encode1Bool` 前缀（直接 `Encode4(len) + SSD 块`），块头同为 `[0x18][(块长-5)&0xFF][u32 0]`，子块内字串长度为 `u32 LE`。
+- **服务器 IP 同步要点**：修改服务器地址时，需同步 `packet/MultiServerInit.kt`（`EN_LOGIN_SERVERS[].ip`，op 1）、`packet/ChannelsExtraInfo.kt`（`ChannelEntry.ip`，op 11）以及客户端二进制补丁 `tools/client/patch_ip.py`（含 `nmconew.dll` / `nmcogame.dll` 的 UTF-16LE 表各 8 槽，详见 `docs/client/client-server-address.md`）。
 
 #### (5) JSON 单一事实源与字节级可复现性
 

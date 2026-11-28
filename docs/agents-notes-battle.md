@@ -1,12 +1,28 @@
 - **对局阶段启动与水泡引爆机制**：
     1. **练习房/单人模式（tst.pcap stream 4）**：
-       由 `Unk_92` (C→S op 92) 触发开始序列：`[111 AILevelChange, 112 GameStartMapInfo, 100 SetPlayer(isStart=true), 136 PracticeBoard]`。
+       由 `StartGameReq` (C→S op 92) 触发开始序列：`[111 StartGameResult, 112 GameStartMapInfo, 100 SetPlayer(isStart=true), 136 GameStart]`。
        - **S→C op 112 GameStartMapInfo（对局地图与出生点/角色槽位初始化，165 字节，CA.exe 0x51F29C）**：在开局时初始化随机数种子、主题 ID、加密地图名（`EncodeCipherStr` 经 `0x75daf0` 加密为 10B `"Cemetery04"`）、地图 ID、槽位出生点/角色/队伍标志等。若地图校验失败会弹出 `"InvalidMapReturnToLobby"` 退回大厅。实现见 `packet/room/GameStartMapInfo.kt`。
        - ⚠️ **这份包同时是「开局有几个电脑」的唯一名册**：`CA.exe 0x0051F522` 读 `E1(slotCount)` 写到 `CGameContext+0x154`，`0x0051F52A` 起按 slotCount 循环读 N 条 17B 记录（`E1 slotIdx / E1 spawnPos / E1 bomber / E1 teamFlag / E1 state / E4×3`），每条第一个字节是**真实槽号**（客户端 `0x51F555/0x51F568/0x51F57B` 用它索引 `CGameContext+0x1e0+slot*0x1e4`），不是循环序号。`0x51F29C` 开头那段 10 次循环由 `0x51F2DF` 的 `je 0x51f408` 在练习房模式直接跳过。
          房间阶段 op 89 踢 AI 只清 `CPrepareStrategyAIBattle` 的本地槽位（`0x52B450 → 0x685ED9` 把 12B AI 配置清成 `(0,0,-1)`），**开局仍以 op112 名册为准**。旧实现写死 `Encode1(8)` + `for (0 until 8)` + `team = if (i==0) 0 else 8`，于是无论踢几个，开局都重建 7 个 AI。
-         现已改为由 `StartGameReq` 传 `Room.slots` 中「`user != null || isAI`」的真实槽号给 `GameStartMapInfo(activeSlots=...)`，只发参战槽位、槽号不压缩重排；默认 `0..7` 保持与 `cap/practice_s2c_op112_167B_0.bin` 逐字节一致。参战判据必须与 `Room.resetMatchState()` 的 `hasSeat()` 一致，否则会出现服务端按 6 AI 判胜负、客户端显示 7 AI 的错位。回归测试 `GameStartMapInfoTest` 2 项。
+         现已改为由 `StartGameReq` 把 `Room.slots` 中「`user != null || isAI`」的参战槽，连同出生点/角色/队伍组成 `GameStartSlotConfig` 传进 `GameStartMapInfo(slotConfigs=...)`（包层唯一入口，必填参数；不再保留 `activeSlots` / `spawnPositions` 第二通道，也没有默认名册）。抓包原值只存在于测试侧 `CaptureFixtures.OP112_SLOT_CONFIGS`，用来逐字节比对 `cap/practice_s2c_op112_167B_0.bin`。参战判据必须与 `BattleSession.start()` 按 `hasSeat()` 定格的参战名单一致，否则会出现服务端按 6 AI 判胜负、客户端显示 7 AI 的错位。回归测试 `GameStartMapInfoTest` 2 项。
          ⚠️ **出生点数量由地图决定**：真端 `CGameSession::LaunchGameStage` 取 `spawns = min(maxPlayer, 8)` 再洗 `0..spawns-1`（`GameSession.ts:1384`），4 人图只有 0..3 四个出生点。旧实现恒洗 `0..7`，4 人图会把玩家放到不存在的出生点。现由 `assignSpawnPositions(mapId, activeSlots)`（`packet/room/GameStartMapInfo.kt`）按参战槽号顺序取用 `MapCatalog.spawnPermutation(mapId)`，`Room.startGame()` 的 JP/TW/CN 分支同源；人数上限查 `MapCatalog.maxPlayerOf(mapId)`。
-       `PracticeBoard (op 136)` (`0x00556b1d` -> `0x00553aa0`) 会直接调用 `0x0053291c` 启动对局全局时钟 `CGameClock` 并初始化所有 Bomber 槽位（设置 `m_bActive = 1`）。
+       **S→C op 136 `GameStart`（开局令，178B，`packet/battle/GameStart.kt`）**（`0x00556b1d` -> `0x00553aa0`）
+       会调用 `0x0053291c` 启动对局全局时钟 `CGameClock` 并初始化所有 Bomber 槽位（设置 `m_bActive = 1`）。
+       它**不含任何棋盘/地形数据**（旧名 `PracticeBoard` 是误称）：地图与出生点在 op 112，方块表由客户端按
+       `resource/fx/Map/*.bin` 模板本地生成。真端把内容拆成 `DoStartGame`(S2C 150) 与 `OnUDPPeerInfo`(S2C 120)
+       两个包，EN 合并成这一个：
+       - `E4 clockBase`（服务端 `timeGetTime()` 毫秒，客户端只拿它启动时钟，值写进 `CGameClock+5` 后无人读）
+       - `E4 sessionKey`（真端 `局次 serial ^ version`；客户端 `0x0054C3E8` 用低 8 位校验局内包：`包内字节 == key ^ CUser+12`。抓包为 0）
+       - `E4`/`E4` 两个秒级时长（客户端 ×1000 写 `+13808`/`+13812`，**写后无读取点**；真端同位置是地图模板的
+         ghostStart/ghostFreq，但抓包 180/0 与 Cemetery04 模板的 40/30 不符，真端更像会话级覆盖值）
+       - `E1 tickFlag`（非 0 → 局内 tick 固定 30ms，否则取配置值 → `CGameSession+63505`）
+       - `E4 ip + E2 port + E1 timeout`（本机 UDP 端点 + 对端存活窗口秒数 → `CUDPPeerManBase+1944/1948`、`peer+136`）
+       - 10 项（`8 + 2`，`0x0053350A` 取槽数 8 后循环到 `i+2`）：`E1 occupied`，占用时再跟 3 组 `(E4 ip, E2 port)`
+         （真端 `UDP_HOST_CAPACITY = 3`；抓包每槽是同一 relay 端点重复 3 次，端口 = 4151 + 槽号）
+       ⚠️ `occupied` 是**名册校验**不是"有没有 UDP"：`flag=1` 但名册无人会回 C→S op 149（`0x00549C35(-1,0,-1)`，
+       即 Ready Ack）；`flag=0` 但名册有人会直接删掉该用户（`0x006892A2`）。所以必须与 op 112 的参战名单同源。
+       本模拟器只有 TCP，所有端点填 0（客户端 `0x00789FD0` 对 `ip/port == 0` 直接跳过，不会去连早已下线的
+       66.135.19.7）；回归测试 `GameStartTest` 5 项（含用抓包原值逐字节还原 178B）。
        ⚠️ **练习房绝不能发送 op 170 / op 171**（op 171 的 `0x00558667` 会设置 `[esi + 0x311c] = 1` 开启多人倒计时 UI；若传入 0 秒时限会导致界面顶部倒计时初始即为 0 且超时卡死）。
     2. **局内炸弹状态与引爆机制（S→C op 138 SetBombState / S→C op 141 DetonateBomb / S→C op 148 TileBombExplode）**：
         - **S→C op 138 SetBombState**（`0x55A627` -> `0x5481BD`）：`Encode1(count) + N * [Encode2(bombId) + Encode1(state) + if (state == 0) Encode4(param)]`。生成炸弹时下发 state=1 激活状态；`0x534B18` 收到 state=0 时调用 `0x565E9F` 引爆炸弹。
@@ -16,9 +32,9 @@
           `0x565E9F` 收到 op138 同帧调 `0x46CE44`（`0x566221` 中心 / `0x56632A` 四向）写水柱记录 `(动画id, 帧计数=0, owner, slot)`，初值 0（`0x566267`），**无逐格扩散延迟**；tile 帧更新 `0x46D030`（虚表 `0x893150`）每帧 +1，到 `0x47BF14 = GetAnimCount(id)` 删记录（反汇编 = `(end-start)>>3`）。
           `resource/fx/ObjectTable/ObjectTable.bin` 的 `Bomb/Fire00` 模板 76 个动画、帧项 `(贴图帧,1)`：中心 `FireC01` **9 帧**、四向 `FireL/U/R/D01` **19 帧**（其余 9~20 帧）→ 按 `1000*a3/30`（`0x45CBB8`）= 30ms/帧，即 **≈270ms / ≈570ms**。
           判定在角色帧更新 `0x4757D5 → 0x4751E6`：`0x46CF29` 读同一帧计数 v17 与 `GetAnimCount-1`，窗口 `v17>=2 || v17<=animCount-3`（`0x4752EA/0x4752F3/0x4752F6`）对 9/19 帧恒真 → **帧 0 起生效，危险期 = 动画期**。命中后 `0x65E4E3` case `'0'` → `0x4611C3 → 0x45E8AF(bomber,500)` 本地起泡泡并置 `+0x2AC4=500`（`0x44B9B4` 每帧 -1，归零走 `0x46DAE4` 发 op154 action=5 / op112 0x60），**"命中 → 死亡上报"另有 500 帧 ≈15s**，与动画无关（ms 值依赖 30ms/帧基准）。
-          ⚠️ 服务端含义：`Room.onTick` 只在 2.5s 引信到期广播 op138、伤害全本地判，别在 T0 结算；若改服务端权威判定，窗口应为 op138 到达后 **0~19 帧（0~570ms）按十字格逐帧判**；最长动画 570ms < `gameOverDelayMs`(1000ms)，结算延迟已覆盖。
+          ⚠️ 服务端含义：`BattleSession.onTick` 只在 2.5s 引信到期广播 op138、伤害全本地判，别在 T0 结算；若改服务端权威判定，窗口应为 op138 到达后 **0~19 帧（0~570ms）按十字格逐帧判**；最长动画 570ms < `gameOverDelayMs`(1000ms)，结算延迟已覆盖。
     3. **客户端事件与状态同步上报机制（C→S op 149 EventItemReq）**：
-        - **开局就绪通知（Ready Ack）**：当客户端收到 `PracticeBoard (op 136)` 完成本地棋盘与槽位初始化后，于 `CA.exe 0x00553E5F` 自动发送 **C→S op 149**（`slotId = -1 (0xFF)`, `token = userId (7215)`, `action = 0`, `param = -1`，混淆字节 `A5 96 CA 4F BA 5A 69 35 AC 6A`）。此包为对局加载就绪同步包，**绝非放置炸弹**。
+        - **开局就绪通知（Ready Ack）**：当客户端收到 `GameStart (op 136)` 完成本地棋盘与槽位初始化后，于 `CA.exe 0x00553E5F` 自动发送 **C→S op 149**（`slotId = -1 (0xFF)`, `token = userId (7215)`, `action = 0`, `param = -1`，混淆字节 `A5 96 CA 4F BA 5A 69 35 AC 6A`）。此包为对局加载就绪同步包，**绝非放置炸弹**。
         - **局内异常回退与状态上报**：客户端在 `0x0044BD9B -> 0x0044BE31` (收到 op 139 时未找到匹配待确认水泡)、`0x0054A58A` (Action 1: 炸弹计数不一致)、`0x0054A678` (Action 2: 放置炸弹失败回退)、`0x0054BFF7` (Action 3: 碰撞校验不一致)、`0x0054A6E7` (Action 4: 引爆炸弹失败回退)、`0x00549DDF` (Action 10: 特殊道具/事件) 等处发送 **C→S op 149**，作为状态同步/异常回退通知。
         - **局内操作包（C→S op 112）**：局内本地玩家移动、使用道具（Action 0x20）与踢水泡（Action 0x40）等在 `0x0054C8B3` 构造并发送 **C→S op 112**。
 - **对局期周期性 S→C op 172 = MapEventSync（地图事件/波时间轴同步），不是 ItemThrow**：
@@ -35,22 +51,22 @@
     1. **客户端放置水泡请求（C→S op 106，按标志位变长）**：玩家或 AI 放泡时（`0x006375A1` / `0x00534CCA`），先由 `CBombBag::0x0044C056` 在本地水泡池 `[esi+0x3c]` 分配待确认水泡（`+0xc0=1, +0x90=-1`），通过 `0x0044BFE0` 生成全局唯一 `bombToken = slotId + 8*k`（存入 `bomb+0x13c`，第 1 轮恰等于 `slotId`，第 2 轮为 `slotId+8`），再经 `CGameMsgCache::0x005391AB -> 0x00539A4B` 发送 **C→S op 106**。
        - 定长 11B = `E2(sessionId) E1(slotId) E4(bombToken) E1(originGridX) E1(originGridY) E1(reservedField) E1(bombFlags)`；`sessionId` 是 `sub_532BC3(gameSession)` 的场次 id（op139 开头校验，必须原样回显），`reservedField` 是客户端 `v6+36` 保留栏（接收侧读出即丢弃），`bombFlags` 低 4 位 = 威力、`0x80/0x40/0x20` 是 `0x00539A4B` 按队列状态置位的特性位。
        - ⚠️ **`bombFlags & 0x20`（发射型水泡 / 坦克炮泡）时追加 5B → 共 16B**：`E1(landingGridX) E1(landingGridY) E1(launchDirection) E2(flightRange)`。前 3 个 E1 是落点格与方向，客户端 `sub_54A3EA → sub_534C3D → sub_4598AB` 把它们写入水泡 `+156/+168/+304`（`sub_459A0B` 按 40px/格换算像素）。实测样本 `A5 69 5A 96 CA 53 BD 50 5B 5A 7D 50 56 58 A2 B9` → session=0 slot=0 token=40 炮口=(10,1) reserved=0 flags=0x27(power 7 + 0x20) 落点=(10,12) 方向=2 射程=2000。
-       - 服务端 `handler/room/SetBomberEventReq.kt` 按 `0x20` 续读 5B，用**落点**注册 `Room.addBomb`（`isSpecial` 也由此位判定，不是旧的 `flag0 != 0`），角色槽位仍记炮口；`flightRange` 只上报、op139 不读故无需回显。残包（标志置位但扩展字节不足）退回炮口，不得越界读断线。回归测试 `src/test/kotlin/bnbemu/netty/SetBomberEventTest.kt`。
+       - 服务端 `handler/room/SetBomberEventReq.kt` 按 `0x20` 续读 5B，用**落点**注册 `BattleSession.addBomb`（`isSpecial` 也由此位判定，不是旧的 `flag0 != 0`），角色槽位仍记炮口；`flightRange` 只上报、op139 不读故无需回显。残包（标志置位但扩展字节不足）退回炮口，不得越界读断线。回归测试 `src/test/kotlin/bnbemu/netty/SetBomberEventTest.kt`。
     2. **服务端确认与倒计时注册（S→C op 139，同样变长）**：服务端在 `SetBomberEventReq.kt` 收到 op 106 后，必须：
-        - 调用 `Room.addBomb(slotId, landingGridX, landingGridY, bombId = bombToken, isSpecial = bombFlags & 0x20)` 将水泡加入 `Room.bombs` 并启动 2.5s 倒计时；
+        - 调用 `BattleSession.addBomb(slotId, landingGridX, landingGridY, bombId = bombToken, isSpecial = bombFlags & 0x20)` 将水泡加入 `BattleSession.bombs` 并启动 2.5s 倒计时；
         - 回显 **S→C op 139 SetBomberEvent**：定长 24B = `E2(sessionId) E1(slotId) E4(bombToken) E4(0) E4(0) E1(originGridX) E1(originGridY) E1(reservedField) E1(bombFlags) E2(bombId) E2(0) E1(0)`；**当 `bombFlags & 0x20` 时必须在 `bombFlags` 之后、`bombId` 之前补写 3B `E1(landingGridX) E1(landingGridY) E1(launchDirection)`（→ 27B）**。客户端 `0x0054A3EA` 读到 `v6 & 0x20` 会多解码 `v18/v19/v20` 三个字节，漏写就会把 `bombId` 的字节当成落点格（实测变成 (165,65) → 40px/格 → 水泡画到屏幕外），且 `bombId` 错乱导致后续 op138 引爆按 id 找不到泡。2026-11-14 根因定案并修复，常量 `bombFlagLaunched` 定义在 `packet/room/SetBomberEvent.kt`。
-        - ⚠️ **发射型水泡必须延时补一包 S→C op 138 `SetBombState(bombId, state=1)`「落地激活」**（2026-11-14 23:24 实测「停在障碍前永不爆炸」根因）：普通泡由 `sub_45AB56` 写入 `+192=1`（已激活）、`+292=0`；发射泡被 op139 的 `sub_534C3D -> sub_4598AB` 改成 `+192=0`（未激活）、`+292=1`（飞行中），且只 `sub_5606C6` 清旧格、不 `sub_560693` 占新格。`sub_565E9F` 引爆要求水泡已激活，而服务端 `state=0` 路径 `sub_534B18` 没有激活补偿，单发 `state=0` 会静默失败，这就是水泡永远不炸的原因。客户端本地撞到图钉（`obstacleType=4`）时有一段补偿 `if (+192 == 0) sub_45976E(this,-1)` 再 `sub_565E9F`（`CA.exe.c:79375`），所以「只有射到钉子才立即爆炸」。`sub_534B18` 的 `state=1` 分支正好调 `sub_45976E(v7,-1)` 设 `+192=1`、清 `+292`、`sub_560693` 占格，且 `a2 == -1` 时不覆盖 `+0x90`，后续 `state=0` 仍按同一 id 找到泡。**顺序必须 op139 在前**（先创建/匹配水泡）；但不能紧跟着发，否则 `sub_45976E` 会清掉 `+292` 截断发射动画。现由 `Room.scheduleLaunchedBombActivation` 延时 `launchedBombActivationDelayMs`（默认 **500ms**，可调）下发，**刻意不改 `expireAt`**，2.5s 引信仍从收到 op106 起算；到点由 `Room.activateLaunchedBomb` 检查 `bombs` 里该 id 是否还活着，已被飞镖/钉子 `onObjectHit` 或 `onTick` 提前引爆移除则直接跳过，不给死泡发激活包。排程用 `ScheduledFuture` 记录，幂等且 `Room.reset()` 会统一 cancel；普通泡不需要这包。回归测试 `SetBomberEventTest` 7 项。
+        - ⚠️ **发射型水泡必须延时补一包 S→C op 138 `SetBombState(bombId, state=1)`「落地激活」**（2026-11-14 23:24 实测「停在障碍前永不爆炸」根因）：普通泡由 `sub_45AB56` 写入 `+192=1`（已激活）、`+292=0`；发射泡被 op139 的 `sub_534C3D -> sub_4598AB` 改成 `+192=0`（未激活）、`+292=1`（飞行中），且只 `sub_5606C6` 清旧格、不 `sub_560693` 占新格。`sub_565E9F` 引爆要求水泡已激活，而服务端 `state=0` 路径 `sub_534B18` 没有激活补偿，单发 `state=0` 会静默失败，这就是水泡永远不炸的原因。客户端本地撞到图钉（`obstacleType=4`）时有一段补偿 `if (+192 == 0) sub_45976E(this,-1)` 再 `sub_565E9F`（`CA.exe.c:79375`），所以「只有射到钉子才立即爆炸」。`sub_534B18` 的 `state=1` 分支正好调 `sub_45976E(v7,-1)` 设 `+192=1`、清 `+292`、`sub_560693` 占格，且 `a2 == -1` 时不覆盖 `+0x90`，后续 `state=0` 仍按同一 id 找到泡。**顺序必须 op139 在前**（先创建/匹配水泡）；但不能紧跟着发，否则 `sub_45976E` 会清掉 `+292` 截断发射动画。现由 `BattleSession.scheduleLaunchedBombActivation` 延时 `BattleConfig.launchedBombActivationDelayMs`（默认 **500ms**，可调）下发，**刻意不改 `expireAt`**，2.5s 引信仍从收到 op106 起算；到点由 `BattleSession.activateLaunchedBomb` 检查 `bombs` 里该 id 是否还活着，已被飞镖/钉子 `onObjectHit` 或 `onTick` 提前引爆移除则直接跳过，不给死泡发激活包。排程用 `ScheduledFuture` 记录，幂等且 `BattleSession.destroy()` / `Room.reset()` 会统一 cancel；普通泡不需要这包。回归测试 `SetBomberEventTest` 7 项。
         - 客户端 `0x0054A3EA -> 0x00534C3D -> 0x0044BD9B` 用第 3 栏 `bombToken` 匹配待确认水泡（`0x0044BE05`），匹配成功后调用 `0x0045976E` 将 `bombId` 写入 `bomb->m_nBombId (+0x90)` 并扣减 `pendingBombs[slotId]`。
-    3. **2.5s 到期引爆（仅 S→C op 138 state=0）**：`Room.onTick` 到期后仅广播 `SetBombState(bombId, state=0)`（不发 op 148）；客户端 `0x00534B18 -> 0x00534338` 按 `bombId` 查找到 `bomb+0x90` 匹配的水泡并调用 `0x00565E9F` 引爆、清除棋盘格与危险区、调用 `vtable[+0x0c](0)` 释放槽位水泡容量，AI 随即恢复移动与下一轮放泡。实现见 `handler/room/SetBomberEventReq.kt` + `packet/room/SetBomberEvent.kt` + `server/Room.kt`；回归测试 `tools/test_ai_sync.py`。
+    3. **2.5s 到期引爆（仅 S→C op 138 state=0）**：`BattleSession.onTick` 到期后仅广播 `SetBombState(bombId, state=0)`（不发 op 148）；客户端 `0x00534B18 -> 0x00534338` 按 `bombId` 查找到 `bomb+0x90` 匹配的水泡并调用 `0x00565E9F` 引爆、清除棋盘格与危险区、调用 `vtable[+0x0c](0)` 释放槽位水泡容量，AI 随即恢复移动与下一轮放泡。实现见 `handler/room/SetBomberEventReq.kt` + `packet/room/SetBomberEvent.kt` + `server/BattleSession.kt`；回归测试 `tools/test_ai_sync.py`。
     4. **飞镖引爆水泡（C→S op 121 + op 108 → S→C op 138）**：
        - `op 121` (`0x00539CC2`，入队点 `0x00465EC8`) 8B = `E1(0) E2(起点Xpx) E2(起点Ypx) E1(方向) E2(射程px)`；
          `op 108` 6B = `E2(对象混淆ID) E1(gridX) E1(gridY) E2(delayMs)`，`delayMs` = `1200*射程px/1000 - 2*ping`（飞镖飞行时间）。
        - ⚠️ **飞镖命中绝不本地引爆**：`0x00465EC8` 命中分支只有 `CSendPacket_CtorWithOp(108)+Send`，全函数无 `sub_565E9F`；
          CGODart 只是本地飞行动画 + 射线命中判定。客户端在等服务端下令：`S→C op138` (`0x005481BD → 0x00534B18 → 0x00534338 → 0x00565E9F`)。
          曾误把 `0x0046DFAD`（`sub_5B67BA` vtable 调用，水泡自身帧更新撞障碍时本地引爆）当成飞镖路径，已纠正。
-       - ⚠️ `op108` 的 `objId` 是 `sub_44B67A(obj+144)` 客户端混淆 ID，**不是** `bombToken`/`Room.bombs[].id`；
+       - ⚠️ `op108` 的 `objId` 是 `sub_44B67A(obj+144)` 客户端混淆 ID，**不是** `bombToken`/`BattleSession.bombs[].id`；
          必须按 `gridX/gridY` 反查服务端水泡，用 op139 回填过的 id 发 `SetBombState(id, 0)`。
-       - 服务端实现 `Room.onObjectHit`（`server/Room.kt`）：命中格无水泡/越界不处理；找到即**立刻从 `bombs` 移除**
+       - 服务端实现 `BattleSession.onObjectHit`（`server/BattleSession.kt`）：命中格无水泡/越界不处理；找到即**立刻从 `bombs` 移除**
          （既是同一颗泡重复上报的去重——实测连发两镖会收到两条逐字节相同的 op108，也防 `onTick` 2.5s 二次引爆）；
          按 `delayMs` 延时广播 op138。`delayMs>0`（飞镖）广播**含发射者本人**（他本地没炸）；
          `delayMs==0`（客户端已本地引爆的路径）排除发射者，只同步其它端。
@@ -71,7 +87,7 @@
 - **推动可移动箱子（C→S op 109 PushMovableBoxReq，2026-11-04 逆向 CA.exe 确认；复现脚本 `tools/rev_op109.py`）**：
     1. **触发链路**：队列由 `0x005393C2`（7 参数：slot + 5 字段 + 立即发送标志）填充，唯一调用者 `0x0054CABA` 是角色移动/碰撞时**尝试推动可移动方块**的处理（`0x005618B3` / `0x0055E32C` / `0x0055D9C2` / `0x0055C845` / `0x0055E42F` 校验格子与像素坐标 `*0x28`），由本地帧循环 `0x0046D878 → 0x0054EC0D` 驱动。⚠️ 该函数**只做校验 + 入队，没有任何本地位移调用**（0x0054CABA 尾部即 `0x5393C2` 后 `ret 0x10`）；`CAIGoalPushBlock` 只是 AI 决策层，所谓「客户端已完成本地预测」的旧结论是**错的**。
     2. **载荷 7B = `E2(boxSeq) E1(gridX) E1(gridY) E1(targetX) E1(targetY) E1(slotId)`**：字段宽度用同一个 `[cache+0xD8]` COutPacket 对象的 C→S op 110（`0x00539BAE`，`E1`×3 走虚表 `+0x20`、`E2(itemSeq)` 走 `+0x28`）交叉验证，编码点 `0x00539D73` 本身也可见 `movzx cx,[edi+4]`(E2) 与 5 次 `+0x20`(E1)。实测日志 `A5 60 59 58 59 59 5C` 经 `xor 0x5A / 0xA569` 解出 `(1, 1,3, 1,4, 0)`，即把箱子从 (1,3) 推到 (1,4)。末字节是客户端 CGameMsgCache 待确认队列的槽位（OnTick 循环下标 0..7），不是玩家槽位。
-    3. **服务端必须广播 S→C op 142 `MovableBoxMove`**（2026-11-05 定论）：局内 S→C 分发器入口 `0x0055A4D8`（`Decode2 0x78F090` 读 2B opcode）在 `141→0x54BD14(DetonateBomb)` 与 `143→0x54BE87(EatItemResult)` 之间，`142` 走 `0x54A5F9`：依序 `Decode2 + 5×Decode1`，然后 `call 0x565CE0` —— **该函数是全 `.text` 里唯一移动可移动箱子的实现，且全文件只有 `0x0054A668`（即 0x54A5F9 内）这一个调用者**，证明箱子位移 100% 由服务端驱动。`0x565CE0(map, idx, x1,y1, x2,y2, slot)`：`map+idx*4+0x19A23C` 取 `CGOTileMovableBox`（idx 即 op109 的 boxSeq）→ 要求 `[box+0x88]/[box+0x8C]` 等于 (x1,y1) → 清源格 `0x5606C6`/`0x5608CF(_,0)`、占目标格 `0x560693`/`0x5608CF(_,1)`、虚表 `+0x64` 更新像素位；失败则 `0x549C35(slot,2,-1)` 回 C→S op 149 回滚上报。广播载荷与 op109 **逐字节同构**，原样回放即可（含推箱者本人）。实现：`packet/room/MovableBoxMove.kt`(`EN_18_send.yaml: MovableBoxMove: 142`)、`server/Room.kt` `onMovableBoxPush` 去重 + `BC`。**去重必要**：持续推箱时 OnTick 每 >5 帧重发同一动作，而 `0x565CE0` 会校验「箱子仍在 (x1,y1)」，重复广播第二次必然失败并触发回滚包，故同 boxSeq+同 src/dst 的上报在 `movableBoxDedupeWindowMs`(默认 400ms) 窗口内只播一次；窗口必须有限，否则某端漏包导致箱子没动时玩家再推也无法重播自愈、箱子会永久卡死。⚠️ 旧 TW_5 的 S→C op 155 / 357 在 EN 客户端没有任何分发分支，发了会被静默丢弃；EN 也没有 C→S op 143 发包点。回归测试 `src/test/kotlin/bnbemu/netty/PushMovableBoxTest.kt` 7 项（handler 绑定 / 7B 实测样本解码 / 残包防御 / 广播 opcode=142 / 广播载荷逐字节对比 / 重复上报不重播 + 连续推动可播 / 越界丢弃）。
+    3. **服务端必须广播 S→C op 142 `MovableBoxMove`**（2026-11-05 定论）：局内 S→C 分发器入口 `0x0055A4D8`（`Decode2 0x78F090` 读 2B opcode）在 `141→0x54BD14(DetonateBomb)` 与 `143→0x54BE87(EatItemResult)` 之间，`142` 走 `0x54A5F9`：依序 `Decode2 + 5×Decode1`，然后 `call 0x565CE0` —— **该函数是全 `.text` 里唯一移动可移动箱子的实现，且全文件只有 `0x0054A668`（即 0x54A5F9 内）这一个调用者**，证明箱子位移 100% 由服务端驱动。`0x565CE0(map, idx, x1,y1, x2,y2, slot)`：`map+idx*4+0x19A23C` 取 `CGOTileMovableBox`（idx 即 op109 的 boxSeq）→ 要求 `[box+0x88]/[box+0x8C]` 等于 (x1,y1) → 清源格 `0x5606C6`/`0x5608CF(_,0)`、占目标格 `0x560693`/`0x5608CF(_,1)`、虚表 `+0x64` 更新像素位；失败则 `0x549C35(slot,2,-1)` 回 C→S op 149 回滚上报。广播载荷与 op109 **逐字节同构**，原样回放即可（含推箱者本人）。实现：`packet/room/MovableBoxMove.kt`(`EN_18_send.yaml: MovableBoxMove: 142`)、`server/BattleSession.kt` `onMovableBoxPush` 去重 + `BC`。**去重必要**：持续推箱时 OnTick 每 >5 帧重发同一动作，而 `0x565CE0` 会校验「箱子仍在 (x1,y1)」，重复广播第二次必然失败并触发回滚包，故同 boxSeq+同 src/dst 的上报在 `movableBoxDedupeWindowMs`(默认 400ms) 窗口内只播一次；窗口必须有限，否则某端漏包导致箱子没动时玩家再推也无法重播自愈、箱子会永久卡死。⚠️ 旧 TW_5 的 S→C op 155 / 357 在 EN 客户端没有任何分发分支，发了会被静默丢弃；EN 也没有 C→S op 143 发包点。回归测试 `src/test/kotlin/bnbemu/netty/PushMovableBoxTest.kt` 7 项（handler 绑定 / 7B 实测样本解码 / 残包防御 / 广播 opcode=142 / 广播载荷逐字节对比 / 重复上报不重播 + 连续推动可播 / 越界丢弃）。
 - **局内道具「电钻 (Drill)」：C→S op 124 DrillReq → S→C op 156 DrillResult**：
     1. **道具定位**：`resource/fx/Attr/ItemAttr.bin` 里 `Drill` / `Item/Drill` 那条记录的 action 栏 = **27**
        （相邻 `RemoteBomb` = 28）。物品使用分派器 `0x0065E4E3` 按 action 分支：
@@ -91,12 +107,37 @@
        · `sub_533D5C(slot) → vtable+92(action + 35)` 播 35..38 四套电钻动作。
        全 `.text` 里**只有这里**能从封包销毁任意格方块 —— 这就是 op 124 的 S→C 端。
     5. **实现**：`packet/room/DrillResult.kt`（`EN_18_send.yaml: DrillResult: 156`）、
-       `handler/room/DrillReq.kt`（`EN_18_recv.yaml: DrillReq: 124`）、`Room.onDrill`。
+       `handler/room/DrillReq.kt`（`EN_18_recv.yaml: DrillReq: 124`）、`BattleSession.onDrill`。
        广播**含使用者本人**（他本地没炸过），与 op109→op142、op107→op141 同构；载荷与请求逐字节一致。
        服务端没有方块/地图状态模型（消块在各客户端本地确定性重算），故只校验「槽位 0..7」+「坐标不越界」，
        不做去重（op 124 是按键一次发一次，直发不走 CGameMsgCache 待确认队列）。
     6. **回归测试** `src/test/kotlin/bnbemu/netty/DrillTest.kt` 11 项（双向 opcode 绑定 / 两个实测样本编解码 /
        端到端广播逐字节对比 / 朝向与槽位 nibble / 残包与多余字节防御 / 越界槽位与越界坐标丢弃）。
+- **道具表全量清点（`fx/Attr/ItemAttr`）**：解析脚本 `tools/parse_item_attr.py`
+  （记录 = `[len][name][len][Item/资源][d1][d2][action][5×3×u32 效果参数]`；action 在 record+172，
+  `0x0065E4E3` 读的 `base+196` 就是它）。共 **132 条记录 / 38 个 action**，只有 **6 个 action 会发 C→S 包**：
+    1. **action 21 飞镖**（`ItemDart` / `ItemDartC`）→ `0x465EC8` 发 C→S op 108（命中）+ op 121（发射队列）。✅ 已实现。
+    2. **action 26 弹簧**（`Spring` / `SpringG` / `SpringC`）→ `0x4660E6` 发 C→S op 112 `action=0x80`
+       （`E1(slot|0x80) E2(x) E2(y) E1(x2) E2(y2) E1((count<<4)|dir)`，弹跳落点）。⚠️ `BomberActionReq`
+       只分派 0x20/0x40/0x60，0x80 被忽略 —— 本人本地跳没问题，只是别的客户端要靠后续移动包才看到。
+    3. **action 27 电钻**（`Drill`）→ C→S op 124。✅ 本条。
+    4. **action 28 遥控水泡**（`RemoteBomb` / `RemoteBombG`）→ `0x46649B` 走 `CGameMsgCache::0x005391AB` 队列发
+       **C→S op 106**，第 9 参数传 1 → `0x00539A4B` 把它写进 `bombFlags` 的 **0x40** 位
+       （队列项 +28 = 0x40 / +24 = 0x80 / +32 = 0x20 即发射泡扩展）。⚠️ 服务端 `SetBomberEventReq`
+       只认 0x20，0x40 也照常挂 2.5s 引信 → **遥控泡会自己提前炸**，要做到"手动引爆"必须按 flag 挂起倒计时。
+    5. 另外每条道具**用成功后**都会补一包 C→S op 112 `action=0x00`（`0x00461479` 尾部：
+       `E1(slot) E2(x) E2(y) E1(用掉数量) E1(itemId) E1(剩余)`）—— 这是"背包扣减"的唯一上报点，目前忽略。
+    6. 剩下两个发包的 action 都**没有接线**（多人同步会失效）：
+       · **action 45 情侣针**（`ItemCpNiddle`）→ `0x46271B` 发 **C→S op 112 `action=0xB0`**
+         （`E1(slot|0xB0) E2(目标x) E2(目标y) E1(目标槽位) E2(itemSeq)`）：救队友脱困。
+         `BomberActionReq` 无 0xB0 分支 → 被救方**永远出不来**，应映射到 `BattleSession.freeBomber(目标槽, saver=自己)`
+         （S→C op 146 state=3）。
+       · **action 46 系列针** → 本地脱困后发 **C→S op 154 action=0**（`0x0046133A C2S_Op154_Action0`，
+         `E2(slot) E2(0) E2(上次itemId) E2(上次数量)`）：`BoxItemSpawnReport` 只消费不广播 → 其他端看不到脱困。
+    7. 其余 32 个 action **纯本地、无发包点**（属性类 1 / 骑乘类 2 / 障碍放置 11 的 `vtable+292` /
+       修理 12 / 盾 29 / 传感器 30 / 氮气 31 / 燃料 32 / 空心泡 33 / 饼干 34 / 刺猬 41·42 /
+       人参 48 / 奖励与金币 90..100 等），服务端不需要任何处理 —— 唯一例外是 **action 47 救援币 / 49 复活券**
+       （`vtable+388 / +392`）属于复活链路，`BattleSession.reviveBomber`（S→C op 160）早已就绪但**没有调用点**。
 - **对局结束判定（赢/输都是服务端下令，2026-11-05 二次修正：改用 op 112 action=0x60）**：
     1. **op154 action=5 只对真人玩家成立，AI 阵亡永不上报**（2026-11-05 定论，含客户端铁证）：
        死亡链是 `0x46897x`（CBomber 帧更新：`0x45CE9E` 命中判定 → `bomber+0x2AC4` 倒计时归零）
@@ -118,17 +159,17 @@
        `vtable[0x150] = 0x45FBA0`（`m_selfidx<0 && m_faislot==0` 才跳过）→ 真人和 AI 的存活者都会发。
        **客户端每帧重发，直到服务端下发结算**：实测杀光 AI 后连发数百条同一条 `3A A5 39 A7 6E`
        （slot 0 / x=80 / y=519），同时其它局内包全部停摆 —— 就是"对局卡住不动"的真身。
-       → `handler/room/BomberActionReq.kt` 已接 `0x60 -> Room.onLastTeamStanding(slotId)`，
-       `Room.onLastTeamStanding` 按"存活方是真人槽还是 AI 槽"决定谁胜，用 `gameOverSent` 去重，
+       → `handler/room/BomberActionReq.kt` 已接 `0x60 -> Room.battle?.onLastTeamStanding(slotId)`，
+       `BattleSession.onLastTeamStanding` 按"存活方是真人槽还是 AI 槽"决定谁胜，用 `gameOverSent` 去重，
        补记落败方 `matchState = DEAD`，然后走 `op169 → op150` 结算二连。
     3. **op154 action=5 路径保留**，用于玩家自己阵亡（以及将来真正的多真人房）：
-       每个 `Slot` 带三态 `matchState`（`OUT_OF_MATCH / ALIVE / DEAD`，开局 `Room.startGame → resetMatchState`
+       每个 `BattleSlotState` 带三态 `matchState`（`OUT_OF_MATCH / ALIVE / DEAD`，开局 `Room.startGame → BattleSession.start()`
        按「座位上有人?ALIVE:OUT_OF_MATCH」重置）。`OUT_OF_MATCH` 同时充当 `onBomberDie` 的守卫，
        挡掉给空槽广播 op 159 的错位包。
         - **人类全灭** → AI 胜，`op 150 winnerTeam = 1`（胜利方槽位取一个仍活着的 AI）；
         - **AI 全灭 && 人类存活** → **玩家胜**，`op 150 winnerTeam = 0`（玩家槽位 0）；
         - 同一槽位的重复上报只广播一次 op 159，`gameOverSent` 保证结算只下发一次，1.5s 延迟
-          （`Room.gameOverDelayMs`）是为了让阵亡动画播完；
+          （`BattleConfig.gameOverDelayMs`）是为了让阵亡动画播完；
         - 顺序 `op 169 InitGameResult → op 150 GameResult`，缺 169/150 不弹结算窗。
     4. ⚠️ **走 action=0x60 路径时不要补发 op 159**：AI 的阵亡动画是客户端本地播的（OnDie 本地调用，
        只是发包被 m_selfidx 卡住），服务端再发 159 会让死亡动作重播。`onLastTeamStanding` 只补记状态。
@@ -168,7 +209,7 @@
            `m_selfidx<0 && slotType==0` 才跳过），AI 座位 slotType 非 0 能过 —— **这是 AI 唯一的濒死信号**。
        - **本模拟器落地（唯一路径）**：`tools/patch_ai_die.py` 把 `0x0046DB08` 的 `74 52`（`je 0x46DB5C`，
          即 `IsLocalPlayerIndex_0or1` 不通过就整段跳过发包）改成 `90 90`。打完补丁后**每个 bomber
-         （含 AI）阵亡都发 C→S op154 action=5**，走的正是人类那条路 → 服务端 `Room.onBomberDie`
+         （含 AI）阵亡都发 C→S op154 action=5**，走的正是人类那条路 → 服务端 `BattleSession.onBomberDie`
          广播 159 + op146 state=5 → 客户端播 0x2A。时机精确、每个 AI 一声，与官方客户端等价；
          对人类玩家行为零变化。
 
@@ -182,9 +223,9 @@
        · 遍历 UI 观察者 `[this+0x3BF8]` 回调 `vtable+0x38(slot)`
        旁证：key `SomeoneResurecction`（`0x8A8558`，`0x57BE4x` 的救援币路径）打的是同一句文案。
        → 包类已按真实语义定名 `packet/room/ReviveBomber.kt`（`EN_18_send.yaml: ReviveBomber: 160`），
-         作为**复活币**的协议基础；服务端入口 `Room.reviveBomber(slotId)`（校验 → `matchState = ALIVE`
+         作为**复活币**的协议基础；服务端入口 `BattleSession.reviveBomber(slotId)`（校验 → `matchState = ALIVE`
          → 广播 op160），目前无调用点。接入复活币时要补：道具校验/扣减 + 背包同步 + 复活后的位置与保护期。
-    6. **排查用日志**：`[Room] BomberDie slot=N (人类/AI) | ...` 与 `[Room] 对局结束: 玩家胜/AI 胜 | winnerSlot=N`。
+    6. **排查用日志**：`[BattleSession] BomberDie slot=N (人类/AI) | ...` 与 `[BattleSession] 对局结束: 玩家胜/AI 胜 | winnerSlot=N`。
        若杀光 AI 后只看到几百条 `BomberActionReq act=0x60 slot=0` 而没有 `对局结束`，说明 handler 没绑上 op 112。
     7. **回归测试**：`src/test/kotlin/bnbemu/netty/GameOverTest.kt`（20 项：action=0x60 handler 绑定 /
        实测样本 `3A A5 39 A7 6E` 端到端结算 / 不重播 159 / 洪水去重 / 结算后迟到包忽略 / 空槽忽略 /
@@ -221,9 +262,9 @@
        - 旧候选已证伪：op138 SetBombState 状态机只有 0 引爆/1 激活，无移动状态；
          笔记里的"op145 14 分支 action 表"实为 **op 146**（`sub_54DDD1`）的 bomber 动作同步
          （case 0..13），驱动的是角色不是水泡。
-       - 实现：`handler/room/BombKickThrowReq.kt` → `Room.onBombMove`（400ms 同动作去重 + 更新水泡位置/倒计时
+       - 实现：`handler/room/BombKickThrowReq.kt` → `BattleSession.onBombMove`（`BattleConfig.bombMoveDedupeWindowMs`，默认 400ms 同动作去重 + 更新水泡位置/倒计时
          + 广播 op141）；`packet/room/BombKickThrow.kt` 。回归测试 `BombMoveTest.kt` 10 项
-- **对局结束回房间：S→C op 155 BackToRoom（2026-11-08 逆向定案，`packet/room/BackToRoom.kt`）**：
+- **对局结束回房间：S→C op 155 BackToRoom**：
     1. **客户端不会自己回房**。结果窗是纯本地 UI：`0x005597FD CheckResultDoc_AndShow` 每帧把 `doc+6520`
        减 30，归零才调 `0x00558EE1` 装配弹窗；而 `doc+6520` 由 `0x00559F8B → 0x0053E181(delayMs-1500)`
        一次性设置 —— **op150 的 delayMs 只决定「多久后弹结果窗」，与「多久后回房」无关**。
@@ -239,10 +280,9 @@
        特殊模式再清 10 条频道记录。3 字节里的 `state` 与 op105 `Slot.meta[0]` 同一套（0x01 关闭 / **0x02 房主** / 0x04 准备）。
        写入侧 `0x6865AC` 只用传入字节并自己重算 key/校验和，传什么都安全（`dword_A373C8` 只在**读回**校验失败时触发）。
     5. **实机验证（2026-11-08 第一轮）**：只发 155 能回房间、AI 也还在，但
-       **「开始」按钮退化成「准备」= 房主位丢失** —— 因为旧实现把 3 条状态一律写 0，把槽 0 的 0x02 抹掉了。
-       现在 `BackToRoom` 默认按 `Room.slots[0..2].state` 下发（槽 0 = FLAG_CHIEF）。
+       **「开始」按钮退化成「准备」= 房主位丢失** —— 因为旧实现把 3 条状态一律写 0，把槽 0 的 0x02 抹掉了。 现在由Room.kt正确写入。
        另一条必修项：155 只把客户端「切回 stage 12」，房间对象/会话是空的 ——
-       `Room.backToRoom` 默认在 155 之后 `roomChainDelayMs`(400ms) 补推整条房间链
+       `Room.backToRoom` 默认在 155 之后立即补推整条房间链
        （`server/RoomEntryChain.kt`，与 C→S op 75 的回应同一串 87/83/4×2/113/100/108/106×8/114·104·105·103）。
     6. **对局结束回房间弹 "InvalidLevelPlayGame" 并踢回大厅（2026-11-09 根因定案并修复）**：
        - **现象**：从大厅进房间时等级正常（5级）不报错，但对局结束通过 `op 155 BackToRoom` 返回房间时弹出 `InvalidLevelPlayGame` 并被踢回大厅。
@@ -252,8 +292,25 @@
          · 同段还用 `+84/+88/+100/+104` 更新 `CLadderInfo` 与房间槽天梯字段，用 `+240/+241/+242`（`0x6E4C72/0x6E4C8C/0x6E4CA6`）更新 `CUserDynamicInfo` 的胜/负/平场次。
        - 旧 `GameResult.kt` 将 `+132` 和 `+136` 硬编码为 `0`，导致客户端一收到 `op 150` 就把 `CUserDynamicInfo` 里的玩家等级从 `5` 抹成 `0`；随后收到 `op 155` 重建 Stage 12 房间（`sub_525250`）时，`sub_67CAC3(1)` 等级门禁读出 `0 < 1` 触发 `InvalidLevelPlayGame` 并踢回大厅（而补推的 `sendRoomEntryChain` 延迟 400ms 且 `op 20` 只挂在 `CLobbyStage` 上，救不回来）。
        - **修复**：`GameResult.kt` 中真人槽 `+132` 与 `+136` 改为写入 `(slot?.user?.level ?: 5).coerceAtLeast(1)`，`+240/+241/+242` 写入玩家胜/负/平场次。回归测试 `GameOverTest.testGameResultPreservesCustomPlayerLevelAndClampsZero`。
-    7. **时序/调参**：`Room.resultReturnDelayMs`（默认 3.5s，负数关闭自动发送）、
-       `Room.reenterRoomAfterBack`（默认 true）、`Room.roomChainDelayMs`（默认 400ms）。
-       聊天框调试命令（debugMode）：`/back`（155+房间链）、`/back raw`（只 155）、
-       `/back <s0> <s1> <s2>`（指定槽位状态字节，试房主位/准备位）、`/back chain`（只补房间链）、
-       `/backchain on|off`、`/backdelay <ms>`。回归测试 `BackToRoomTest.kt` 9 项。
+    7. **时序/调参**：`BattleConfig.resultReturnDelayMs`（默认 7s，负数关闭自动发送）、
+       `BattleConfig.reenterRoomAfterBack`（默认 true）。
+- **地图脚本炮台（金银岛等 30 张图，C→S op 133 / op 134）**：地图 `.bin` 尾部 `<mapscript>` 的
+  `<time ms><bomb x y power count state targetrow targetcol extendscope/></time>` 到点后，
+  **客户端**自己挑空格子（`sub_5364F3` 扫矩形/全图 + `sub_5345B3` 过滤 + 洗牌）发 op 133 上报；
+  服务端逐格广播 S→C op 139（**slot=8** = CGOBombSprinkler + **炮口像素 sourceX/Y** + 落点格），
+  2.5s 后照常用 op 138 引爆。⚠️ **落点两栏是 `(row, col)`，不许转置**（op 139 第 6 栏 = 行 →
+  泡 +156 → `SetPos y = 40*row+39`；第 7 栏 = 列 → +168 → `x = 40*col`，与 op 133 线序相同；
+  写反了泡会落到对角翻转的格子=客户端没筛过的墙/箱子上，踩格写坏占用记录后引爆必崩）。
+  ⚠️ **op 100 的 meta[0] bit1 一位两用**：准备阶段叫「房主」(FLAG_CHIEF=0x2)，
+  **局内**叫「地图脚本控制权」（客户端 `sub_68848D` 就读它决定谁发 op 133）——
+  开局那一发必须给 0 号槽补回这一位（`SetPlayer.mapScriptController`，由 `StartGameReq` 按
+  `MapCatalog.of(mapId)?.hasMapScriptBombs` 传入），否则炮台全程哑火。
+  op 134 **不是炮台射击**，是「金钱方块（CGOTileLucci）被炸开、滚出一枚金币」的上报（`sub_578D5A`）：
+  `E1 金币 itemId + E4 瓦片像素X + E4 瓦片像素Y + N×(row,col) 落点`，只有地图脚本控制权持有者发，
+  客户端本地不建对象。
+  **别回声 S→C 134**（那是另一个 1 字节包，会让所有客户端弹 UI）。服务端只记账，见 `handler/battle/LucciTileHitReq.kt`。
+  详见`handler/battle/MapScriptBombReq.kt`、`packet/battle/MapScriptBomb.kt`。
+
+- 局内包第 1 栏 E2「context 槽号」= **客户端 CGameContext 在 CGameStage 里的下标（0/1/2）**，不是房间号：
+  客户端在构造时写死（`sub_536B05` 的第 2 参 → `+254080`，`sub_532BC3` 读它），
+  按玩法选槽（普通 0 / 特殊 stage 1 / 怪物 mode==14 2），**没有任何报文能改**。

@@ -105,8 +105,22 @@
   `E4(66)`=由房间类型算出的**游戏规则 id**）。服务器连发整套房间设置回应（线序 seq=187~328）：
   `[87 RoomList, 83 EnterSessionResult, 4(13B), 4(65B), 113, 100(78B), 108, 106×8,
   每槽(114,104,105,103 交错, 槽7 无 103), 198, 423]`；
-  随后客户端自动跟发 297/302，再发 **op 92** 触发游戏开始 → S 回 `[111, 112 SelectMap(165B),
-  100(77B), 136(178B 棋盘块)]`（线序 seq=331~340）。
+  随后客户端自动跟发 297/302，再发 **op 92** 触发游戏开始 → S 回 `[111 StartGameResult(0), 112
+  SelectMap(165B), 100(77B), 136(178B 棋盘块)]`（线序 seq=331~340）。
+- **S→C op 111 = StartGameResult「开始游戏」结果码**：`CPrepareStage::OnPacket` 0x52A949 case 111 → `sub_5285BD`（CA.exe.c:249938），
+  全 `.text` 唯一接收点，**帧体只有 1B**（`Packet_ReadUInt8` + `switch`）。判定依据：函数一进来就
+  `if (*(this+3038)==3) *(this+3038)=0;`，而 `this+3038` 是「等待服务端回包」锁状态，值 3 全二进制
+  只由开局发包器 `sub_527EE0`（0x527EE0，CA.exe.c:249638）在发出 C→S op 92 后写入（其余 1/2/5/6/7/9
+  = op 85/89/87/86/117/天梯）。取值：**0/1 = 成功**（不弹文案，只调 `vtable[+0x1C4](this, 0)` 让房间
+  UI 继续锁着，因为马上切对局；抓包实测 0，帧体 0x5A）；**2..8/10/13/14/15/18/19/20/22/23/24 = 失败**
+  （错误音效 20 + `sub_5261BF` 弹本地化原因 + `vtable[+0x1C4](this, 1)` 解锁 UI）；见StartGameResult注释。
+  **其余值（9/11/12/16/17/21/25…）落 default 直接 return，既不提示也不解锁
+  UI（房间按钮卡灰）**，服务端不可发。同表还用于客户端本地预检：`sub_527EE0 → sub_51C200`（房间）/
+  `sub_51C104`（练习、单人地图 mapId 43..71 与 80/81/82，正常返回 0）。实现在
+  `packet/room/StartGameResult.kt`（`StartGameResult(code = 0)`），回归见 `GameStartMapInfoTest`
+  对 `0x5A` 的逐字节断言。**AI 难度档不在 op 111**：见 op 103 `PracticeSetSlotAI` → `sub_685E9B`
+  写 12B 槽位记录；`opcode_send.yaml` 里旧的 `AILevelChange: 111` 已注释（`packet/room/AILevelChange.kt`
+  是同一误标的死代码），旧的 `StartGameResult: 115` 也已纠正（op 115 实为 `BanChief*` 房主限制提示）。
 - **S→C op 113 = 房间名 / 会话名同步（`RoomName.kt`）**：
   抓包 blob `a5 69` 不是「数值 0」，而是 `EncodeCipherStr(房名)` 的 `E2(0)` 长度前缀（空房名）；
   完整包 `a5 18 a5 69`（前 2B = Encode2(113)）。`CSlotStage::OnPacket` 0x4F480C /

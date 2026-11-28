@@ -13,14 +13,14 @@
 > 依据 cap/*.pcap 三个抓包（start / login / enter-channel，抓包对象即 66.135.19.7），
 > 188 个加密包按下列格式全部通过 CRC8 校验（CRC8 当 oracle 逆向）；另有 enter-channel.pcap
 > 登录连线收尾 5 帧半截流（跨 pcap 截断，经 brute_c2s/brute_s2c 暴力对齐 seq 补解，
-> 内含 op 6→op 7 关键交互，见"关键观察"）。
+> 内含 op 6→op 7 关键交互，见 `docs/agents-notes-lobby.md`）。
 > 权威参照：`tools/decode_final.py`（解码器 + 协议注释）、`cap/decoded_dump.txt`（逐包明文）。
 > 加密原语与项目实现完全一致，当年对不上的只有帧封装和 opcode 表，均已修正并落地到代码。
 
-## 帧格式（已在 Codec.kt EN 分支实现）
+## 帧格式（实现见 `netty/Codec.kt`）
 - seq 两方向各自独立计数，初始 40，步进 3，**每连接重置**（实测不是进程级全局；曾疑似 seq=70 起连，实为抓包截断的残流）
 - S→C 握手 banner（占 seq=40）：`[0x00][len:2 BE 明文][payload 明文]`，无 hc、无 CRC、无加密；
-  banner 20 字节在三次抓包中逐字节一致，已照抄进 `ConnEstablished`（isEN 分支）：
+  banner 20 字节在三次抓包中逐字节一致，已照抄进 `ConnEstablished`：
   `00 00 12 00 12 00 00 00 00 01 00 00 00 00 00 00 37 00 00 00`
 - S→C 加密（seq 从 43 起，banner 占用 40）：`[hc][0x00][len:4 BE ^ 0x96CA5395][payload][CRC8]`，hc = 231^(102+seq)
 - C→S 加密（seq 从 40 起）：`[hc][uid:2][len^0x69:1][payload][CRC8]`，hc = 231^(192+seq)；
@@ -36,76 +36,19 @@
 - 游戏 TCP **3838**：登录、频道、房间全部业务都在这一个端口
 - TCP **47611**：Nexon passport 登录协议，客户端先在此验证账号密码换取票据再连 3838。详见 `PassportServer.kt`。
 
-## opcode（已补全进 EN_18_recv/send.yaml）
-- 可信命名（抓包时序验证）：C→S 2 AskFirstInfo、7 OnConnEstablished、15 ChannelsStateReq、
-  64 UserSimpleInfoReq、81 JoinSessionReq；S→C 1 MultiServerInit、2 FirstInfoInit、7 ResConnectToSvr、
-  11 ChannelsExtraInfo、13 ChannelsState、14 ChannelsGameState、20 UserDynamicInfo、
-  81 JoinSessionResult、200 MyPageSlots、210 DynamicMapInfo
-- 已实现绑定（原名 Unk_* 占位）：C→S 0 AskFirstSession（首连打开）、
-  55 StringTableRevisionReq（登录后上报本地 3 份 SSD 版本号 [StringTable, QuestString, CurseFilter]，触发回频道列表）、
-  11 EnterChannelReq（进频道）、15 ChannelsStateReq（频道状态轮询，回 op 13）、
-  64 UserSimpleInfoReq（空消费，回应在 StageInitReq 链内）、297 RegisterSessionKey / 39 / 302 UserStageSyncReq（玩家舞台/特性状态同步请求，回 S→C 310 与 302）/ 310 UserMapListReq（频道在线地图与用户列表请求，回 S→C 254 与 72）/ 293（空消费）、78 StageInitReq（阶段就绪触发点，回 293/78/4×2/227/60/310/302 核心配置链）、
-  81 JoinSessionReq（进频道自动空包，⚠️ 非"进房"；2026-08-31 起回应=整条**进频道握手推送**，
-  客户端发 81 后会等这条推送才继续发 274/281/276，缺它卡"正在连接"对话框，见 JoinSessionReq.kt）、
-  274（13B×2）/281（空）/276（空）（握手后续，空消费，无逐包回应）；
-  S→C 193 FirstSessionNotify、67 FirstInfoTail、51 CurseFilterTable（旧名 MultiServerTail）、4 AskFirstInfoResult（登录连线 65B）
-  / SessionInfoResult（频道连线 65B 全零变体）/ UserSimpleInfoResult（13B 变体，三种同类名映射同 op 4；
-  前两者已结构化为 `packet/AskFirstInfoResult.kt` 的 `UserInfo` 类，userId=7215/会话串
-  f0ae35f3 等账号值暂用抓包常量 CAPTURE_USER_ID/SESSION_STRING）、
-  12 ChannelsNotice（公告与PPL广告信息）、48 PermissionInfo（**玩家权限设定与功能开关**，空体或 E4(id)+16×E1(flag) 列表，CPermissionMan）、97 ChangeStage（**切换游戏阶段**，E2(11) 大厅 / E2(20) 广场，CMainSystem::SetStage，触发客户端自动发 op 78 StageInitReq）、
-  22 StageNotice（舞台中部系统提示气泡）、
-  7 ResConnectToSvr（op 6 ReqConnectToSvr 的回应，见下方关键观察）、
-  122 UserDynamicInfoValue（**CUserDynamicInfo 单Lucci同步**）、423（op 7 回应后的推送，原样重放）、87 RoomList（**房间列表**，已结构化可动态生成，见关键观察）、
-  310 UserMarketItemList（**个人交易市场物品列表**）/ 302 UserMarketMyItemList（**个人在市场寄售物品列表**）、254 SelfUserInfo（**本机玩家资料/大厅等级面板**）、227 MyPageInfo（**个人资料摘要与商城版本**，CMyPageDialog）、72 SessionList（**频道在线用户列表**，已结构化可动态
-  生成，见关键观察）、
-  293(E1(0))/78 QuestConfigTable（任务配置表，E4(count)+条目列表，空为 E4(0)）、60 ItemDef（全量物品定义表，已结构化类似 ShopCatalog，支持动态配置与进阶角色卡）、
-  81 JoinSessionResult（**大厅名册**，已结构化 `packet/JoinSessionResult.kt` 的 `RosterEntry`，
-  `E4(人数)+N×[E1槽位+E4账号数值+E2名长+令牌]`，账号数值=passport 0x2E 同值）、
-  413 UserInventoryInfo（**玩家背包槽位/容量初始化**，614B 50槽，CUserInventoryMan/ 198 / 200 MyPageSlots / 274 UserItemUpdate×2（**道具槽位更新**，CUserItemMan）/ 212 FxConfig（**特效与角色可用性配置**，CFxContext）/ 210 DynamicMapInfo / 65 ShopCatalog(≈6.8KB 压缩块，明文 50KB) / 204 ShopStringTable / 66 ShopPackageMap / 14(9B 变体) / 20 / 261 ShopVersion（**商城目录版本校验与开关**，CShopItemMan，不一致触发客户端发 276）/ 247 CoupleStateSync
-  进频道握手推送，
-- 尚无 handler/packet（yaml 里 Unk_* 占位）：
-  S→C 86（大厅期周期推送，⚠️ 非"进房后"）
-- 大厅逻辑参见 `docs/agents-notes-lobby.md`
-- 房间逻辑参见 `docs/agents-notes-room.md`
-- 对局逻辑参见 `docs/agents-notes-battle.md`
-- 商城逻辑参见 `docs/agents-notes-shop.md`
-- 实现见 `handler/CreatePracticeSessionReq.kt`（op 75，⚠️ 原误绑 op 86）、`handler/Unk_92.kt`（游戏开始）、
-  `handler/room/BomberActionAckReq.kt`（C→S op 172 角色动作切换确认空包）、`packet/Practice*.kt` / `packet/room/MapEventSync.kt`；
-  工具 `tools/extract_op75.py`（提取回放+blob）、`tools/gen_practice_kotlin.py`（生成 blob 常量）；
-  基准 cap/practice_s2c_op*.bin。op 4 的 13B/65B 变体与进频道一致（body 已核对 = chan 基准）。
-- **个人名片与玩家详细资料界面（My Page / op 301, op 73, op 66, op 74, op 273, op 288 SweetieInfoReq）**：参见 `UserInfoReq.kt` + `UserRestrictReq.kt` + `SweetieInfoReq.kt`。
-- **玩家换装/装备穿戴变更同步请求（C→S op 273 **：参见ChangeEquipReq.kt
-- 注意：**带下划线的 Kotlin 函数名无法注册发送包**（OpcodeManager 的 filteredName 会
-  substringBefore('_') 截断），新 Packet 类名不能含下划线；handler 顶层 val 名可含下划线（精确匹配字段名）
-- **大厅聊天 C→S （op 18）**：参见ChatMsg.kt
-- **地图脚本炮台（金银岛等 30 张图，C→S op 133 / op 134）**：地图 `.bin` 尾部 `<mapscript>` 的
-  `<time ms><bomb x y power count state targetrow targetcol extendscope/></time>` 到点后，
-  **客户端**自己挑空格子（`sub_5364F3` 扫矩形/全图 + `sub_5345B3` 过滤 + 洗牌）发 op 133 上报；
-  服务端逐格广播 S→C op 139（**slot=8** = CGOBombSprinkler + **炮口像素 sourceX/Y** + 落点格），
-  2.5s 后照常用 op 138 引爆。⚠️ **op 100 的 meta[0] bit1 一位两用**：准备阶段叫「房主」(FLAG_CHIEF=0x2)，
-  **局内**叫「地图脚本控制权」（客户端 `sub_68848D` 就读它决定谁发 op 133）——
-  开局那一发必须给 0 号槽补回这一位（`SetPlayer.mapScriptController`，由 `StartGameReq` 按
-  `MapCatalog.of(mapId)?.hasMapScriptBombs` 传入），否则炮台全程哑火。
-  op 134 是炮台游戏对象自身的射击上报，字段布局未有抓包实证，解析严格校验、不符只消费不建泡。
-  详见 `docs/map-cannon-sprinkler.md`、`handler/battle/MapScriptBombReq.kt`、`packet/battle/MapScriptBomb.kt`。
+## opcode
+- 全量映射表见 `src/main/resources/opcode_recv.yaml` 与 `src/main/resources/opcode_send.yaml`（`Unk*` 为尚待命名的抓包占位）。
+- ⚠️ **带下划线的 Kotlin 函数名无法注册发送包**（`OpcodeManager` 的 `filteredName` 会 `substringBefore('_')` 截断），新 Packet 函数名不能含下划线；handler 顶层 `val` 名可含下划线（精确匹配字段名）。
+- 分模块协议与实现笔记：
+  - 大厅：`docs/agents-notes-lobby.md`（op 87 房间列表、op 72 在线用户、op 6→7 换线、op 20/122、op 310/302、op 83、聊天 op 18）
+  - 房间：`docs/agents-notes-room.md`（建房/练习房 op 75、准备/选图/选色/选角/AI）
+  - 对局：`docs/agents-notes-battle.md`（开局 op 112/136、放泡/引爆/飞镖/箱子/电钻/道具表）
+  - 商城：`docs/agents-notes-shop.md`（进出商城、购买、三份本地缓存、角色预览）
+  - 装备：`docs/agents-notes-equip.md`（槽位编码、op 198/100/273、角色卡机制）
 
-## SSD 资料块编码（op1/op2/op51/op11/op13/op12 内嵌子块）
-- 结构：`Encode1Bool(true) + Encode4(len) + len 字节资料块`（op13/op12 无开头的 Encode1Bool）；
-  资料块变换：**4/2/1 三档**——4B 一组 BE 读、XOR 0x96CA5395、按 LE 写回；余 2B BE 读 ^0xA569；余 1B ^0x5A
-  （客户端 `sub_75DAF0`，CA.exe.c:709349）。块长非 4 的倍数时尾部同样要解，**没有"原样保留"的余数**
-- 块头规律（op1/op2/op11/op12/op13 五块吻合）：`[0x18][u32 LE 块长-5][u8 compress]`（`SsdCodec.buildSsdBlock`；
-  客户端 `sub_78C120` 按 u32 读长度，块 < 16 MB 所以高字节恒 0）
-- **op11 = 频道列表、op13 = 各频道开关/状态、op12 = 公告与PPL广告信息，均已结构化**：频道表 `EN_CHANNELS` 定义在
-  `packet/ChannelsExtraInfo.kt`（`ChannelEntry`，op13 用其 `state`/`enabled` 栏，
-  生成逻辑在 `ChannelsState.kt`；
-- op1 = multisvr.ssd 缓存体（`MultiServerInit.kt`；
-  op51 = filterstr.ssd 敏感词库（`CurseFilterTable.kt`
-  op2 = csysstr.ssd 系统字串字典（客户端 `CStringMan`，38 条 key→文案，客户端会小写化 key；
-  `data/CsysStr.kt` 程序化生成，`packet/FirstInfoInit.kt` 只写三个字段，细节见 `docs/client/ssd-file.md` (4.2)）；
-  **op12 = 公告与广告块 `ChannelsNotice.kt`
-- 已改写为 127.0.0.1 的 IP 位置：`packet/MultiServerInit.kt` EN_LOGIN_SERVERS[].ip（op1）、
-  `packet/ChannelsExtraInfo.kt` ChannelEntry.ip（op11）——**改服务器地址需同步**
-  `tools/client/patch_ip.py`（客户端二进制侧，含 nmconew.dll/nmcogame.dll 的 UTF-16LE 表各 8 槽；
+## SSD 资料块编码
+- 编解码实现在 `SsdCodec.kt`，各块协议与结构详见 `ssd-file.md`（覆盖 `op1/op2/op11/op12/op13/op51/op210`）。
+- 改服务器 IP 须同步：`packet/MultiServerInit.kt`（`EN_LOGIN_SERVERS[].ip`，op1）、`packet/ChannelsExtraInfo.kt`（`ChannelEntry.ip`，op11）、`tools/client/patch_ip.py`（客户端二进制侧）。
 
 ## 真实流程（按抓包时序，逐字节细节查 decoded_dump.txt）
 1. 连 47611 passport：**0x000B 登录换会话 → 换线 0x002D 查询角色**（协议实现见 `netty/PassportServer.kt`）；随后带 36B 票据连 3838
@@ -115,21 +58,20 @@
    用户选频道后 C 发 op 11 EnterChannelReq + 297 + 39 → S 推 **[11, 13]**
 4. 客户端取进频道连线地址：C 发 **op 6 ReqConnectToSvr**（E1(10)+E4(2)）→ S 回 **op 7 ResConnectToSvr**
    （E1(1)+E1(10)+E4(2)+E4(IP)+E2(3838)；期间夹有 3 个 op 86 周期推送）→ 客户端关闭登录连接（FIN），
-   新开连线到 IP:3838（60246 → 60248）
-5. （新连线上）C 发 op 7 OnConnEstablished（EN 36B：E1(1) + [E2(4)+会话串] + E4(639) + E4(0) + 8B 原样 +
-   频道hash×2 + E1(1)（hash=0x12233322 两处同值，op 15 轮询包里也带它，语义未定，**不是** op 11 的缓存校验和）；
-   前段与 TW 共用 userCount/name/userId 解析）→ S 回
-   **[48 空体, 13, 14, 97, 122 UserDynamicInfo, 87, 423]**（线序 seq=43~61）；
+   新开连线到 IP:3838
+5. （新连线上）C 发 op 7 OnConnEstablished（EN 36B：E1(1) + [E2(4)+会话串] + E4(639) + E4(0) + 8B 校验码 +
+   频道hash×2 + E1(1)，详见 `handler/OnConnEstablished.kt`）→ S 回
+   **[48 空体, 13, 14, 97, 122 UserDynamicInfoValue, 87, 423]**（线序 seq=43~61）；
    随后 C 跟发 297 / 302 / 310 / 64 / 293 / 78 批次 → 批次收齐（78 最后）后 S 按线序回
    **[310, 302, 254, 72 用户列表, 293, 78, 4(13B), 4(65B), 227, 60 46KB, 310, 302]**（seq=64~97，
    用户列表据此显示）→ 进入大厅期
-   ⚠️ 线序 = seq 顺序；dump_flow.py 按时间戳排序会因 TCP 合包失真（如 122 实际紧跟 97，却显示在 60 之后）
-6. 进频道：C 发 op 11 EnterChannelReq.kt → S 回 [11 ChannelsExtraInfo 218B, 13 44B, 12 27B, 11, 13]
-7. 进频道握手：C 收齐 72 用户列表后自动发 **op 81 空包** →
-   S 跟发整条**进频道握手推送** [310, 302,] 413, 198, 200 MyPageSlots, 274×2, 122 UserDynamicInfo, 212,
+   ⚠️ 线序 = seq 顺序；`dump_flow.py` 按时间戳排序会因 TCP 合包失真（如 122 实际紧跟 97，却显示在 60 之后）
+6. 进频道：C 发 op 11 EnterChannelReq → S 回 [11 ChannelsExtraInfo 218B, 13 44B, 12 27B, 11, 13]
+7. 进频道握手：C 收齐 72 用户列表后自动发 **op 81 空包**（非进房，详见 `handler/JoinSessionReq.kt`）→
+   S 跟发整条**进频道握手推送** [310, 302,] 413, 198, 200 MyPageSlots, 274×2, 122 UserDynamicInfoValue, 212,
    210 DynamicMapInfo, 87 RoomList, 65 6.8KB(压缩块), 204, 66, 14(9B 变体), 20, 261, 247, 423, 81 名册, 72
    （分三波下发：客户端**等推送才继续发** 274/274/281 → 等 → 276，缺推送客户端卡"正在连接"对话框）；
-   之后大厅期 S 周期推 op 81 名册 / 72 / 122 UserDynamicInfo / 87 / 86（86 尚未实现）
+   之后大厅期 S 周期推 op 81 名册 / 72 / 122 UserDynamicInfoValue / 87 / 86
 
 ## 测试资产（改协议层后必跑）
 - `tools/replay_test.py` + `replay_first_cs.bin` / `replay_login_cs.bin` / `replay_enter_cs.bin` /
@@ -192,7 +134,5 @@
 
 ## 构建 / 运行约定
 - JDK 21
-- 启动命令：`mvn compile exec:java`  **必须在项目根目录启动**（Config.yaml / EN_18_*.yaml 按 CWD 加载）。
+- 启动命令：`mvn compile exec:java`  **必须在项目根目录启动**（Config.yaml按 CWD 加载）。
 - JAVA_HOME: `C:\Program Files\Java\jdk21.0.12_9`
-- Locale=EN：EN_18_*.yaml = 破解适配的真实协议；TW_5_*.yaml = 老版本其他区域客户端实现，仅供参考
-- 新加的逻辑一律按EN区域客户端处理，不用判断区域。
