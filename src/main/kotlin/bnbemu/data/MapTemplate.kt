@@ -62,6 +62,11 @@ data class MapTemplate(
      * SnowyFields15~16 / Monster19~21,36 / MonSeal99）。
      */
     val hasMapScriptBombs: Boolean = false,
+    /**
+     * 怪物模式（StageClear / Mode 14）关卡脚本元数据，直接从 `.bin` 尾部 `<StageClearScript>` XML 解析。
+     * 非怪物图返回 null。
+     */
+    val monsterStage: MonsterStageSpec? = null,
 ) {
     /** 真端数据包里的条目名（无扩展名）："Map/Bula00"。 */
     val entry: String get() = "Map/$name"
@@ -135,6 +140,7 @@ data class MapTemplate(
                 themeName = themeNameOf(name),
                 header = header,
                 hasMapScriptBombs = containsMapScriptBomb(data),
+                monsterStage = MonsterStageSpec.parseFromMapBin(name, data),
             )
         }
 

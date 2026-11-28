@@ -8,6 +8,7 @@ import bnbemu.netty.DecodeCipherStr
 import bnbemu.netty.PKTHandler
 import bnbemu.packet.ClientStage
 import bnbemu.packet.lobby.SESSION_TYPE_BATTLE
+import bnbemu.packet.lobby.SESSION_TYPE_MONSTER
 import bnbemu.server.*
 import bnbemu.service.PlayerService
 import bnbemu.service.player
@@ -84,7 +85,14 @@ val CreateSessionReq = PKTHandler { c ->
     // ⚠️ 普通房真实应为「其余槽留空等真人加入」, 但回应链里 103/105/114 仍是 AI 槽推送,
     //    两者必须一起改; 等普通房 S→C 抓包钉死线序后再在 isPractice 处分叉。
     val player = c.player
-    if (sessionType == SESSION_TYPE_BATTLE) {
+    if (sessionType == SESSION_TYPE_MONSTER) {
+        Room.defaultMonsterMap()?.let { defaultMap ->
+            room.mapId = defaultMap.mapId
+            room.activeMapId = defaultMap.mapId
+            room.themeId = defaultMap.themeId
+        }
+        room.setupMonsterSlots(player, c, bombers)
+    } else if (sessionType == SESSION_TYPE_BATTLE) {
         room.setupAiBattleSlots(player, c, bombers)
     } else if (player != null) {
         val requestedBomber = bombers.firstOrNull() ?: player.bomber

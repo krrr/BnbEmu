@@ -12,33 +12,39 @@ import bnbemu.netty.PKT
  */
 const val bombFlagLaunched = 0x20
 
-// 局内角色/AI 放置水泡确认广播 (S→C op 139, CA.exe 0x0054A3EA) — tst.pcap stream4 sq=367~397 逐包 CRC8 验证
+/** 怪物/非玩家泡的槽位编号（客户端 `CBombOwnerNotBomber`）。 */
+const val MONSTER_BOMB_SLOT = 9
+
+/** op 139 尾部 `shape` 字段（`sub_54A3EA` 的 `v12` → `bomb+107`）。 */
+const val BOMB_SHAPE_NORMAL = 0
+/** 单向定向水柱（`v12 == 1`，后跟 `E1(beamDirection)` → `sub_55F2A6`，`sub_564622` 原生阻挡判定）。 */
+const val BOMB_SHAPE_BEAM = 1
+/** 空心矩形水波（`v12 == 2`，后跟 `E1(rectDistance)` → `sub_55F2CA`，`sub_564622` 原生边界裁剪）。 */
+const val BOMB_SHAPE_HOLLOW_RECT = 2
+
+// 局内角色/AI/怪物 放置水泡确认广播 (S→C op 139, CA.exe 0x0054A3EA) — tst.pcap stream4 sq=367~397 逐包 CRC8 验证
 // 客户端局内每送出一个 C→S op 106 (SetBomberEventReq) 后, 服务器必须回显本包,
 // 且两者严格一问一答 (客户端收到 op 139 才完成待确认水泡的 bombToken 匹配与 bombId 赋值)。
 //
 // 定长部分 (24B) = E2(contextSlot) E1(slotId) E4(bombToken) E4(sourceX) E4(sourceY)
-//                   E1(originGridX) E1(originGridY) E1(reservedField) E1(bombFlags)
-//                   E2(bombId) E2(initialState) E1(0)
-// 变长部分 (仅 bombFlags & 0x20 时, +3B → 27B) = E1(landingGridX) E1(landingGridY) E1(launchDirection)
-//   · 位置: 紧跟 bombFlags 之后、bombId 之前, 与 sub_54A3EA 的 v18/v19/v20 读序严格对齐。
-//   · C→S op 106 的第 4 个扩展字段 E2(flightRange) 客户端在 op 139 不读, 无需回显。
-//   - contextSlot   (第1栏 E2): 客户端 `CGameContext` 在 `CGameStage` 里的槽号 (0/1/2), 客户端
-//                              `sub_54A3EA` 开头用 `sub_532BC3(ctx)` 校验, 不符整包丢弃。
-//                              ⚠️ 不是房间号 (`Room.sessionId`) 也不是"场次 id"; 没有任何报文能改它,
-//                              只能靠开局按玩法推导 (见 BattleSession.contextSlot)。有请求包的场合原样回显。
-//   - bombToken     (第3栏 E4): 必须原样回显客户端 op 106 传来的 bombToken (slotId + 8*k), 供 CA.exe 0x0044BE05 匹配待确认水泡
-//   - sourceX/Y     (第4/5栏 E4): **水泡起飞点的像素坐标** (sub_54A3EA 的 v15/v16, 0x00534C3D 原样
-//                              交给槽位对象的虚表 +68)。玩家放泡恒 0 —— 0x00578AC1 找不到"像素=0"
-//                              的空闲子对象就跳过起飞; **地图脚本炮台 (C→S op 133) 必须带炮口像素**,
-//                              否则客户端只会在目标格凭空冒一颗泡, 没有从炮口飞进棋盘的动画
-//                              (链路: +68 → sub_578AC1 → sub_4597B2 存 +252/+256 并置 +260=飞行)。
-//   - bombId        (定长第10栏 / 变长第11栏 E2): 服务端分配的水泡 ID (真实服直接取 bombToken),
-//                              供 CA.exe 0x0045976E 写入 bomb+0x90,
-//                              后续 S→C op 138 SetBombState(bombId, state=0) 引爆时按此 ID 查找水泡 (0x00534338)
-//   - bombFlags     (第9栏 E1): 低 4 位 = 威力, 0x80/0x40/0x20 为特性位; 0x20 决定本包是否带落点扩展
-//   - reservedField (第8栏 E1): C→S op 106 的 v6+36 保留栏, 客户端 0x0054A3EA 读出后丢弃 (v10), 原样回显即可
-//   - initialState  (bombId 后的 E2): 客户端 sub_54A3EA 读进 v11 后不参与建泡 (仅消费);
-//                              地图脚本把它当 `<bomb state>`(3/4) 原样透传, 玩家泡恒 0
+//                   E1(originGridX) E1(originGridY) E1(isSquareExplosion) E1(bombFlags)
+//                   E2(bombId) E2(initialState) E1(shape)
+// 变长部分 1 (仅 bombFlags & 0x20 时, +3B, 位于 bombFlags 与 bombId 之间):
+//   E1(landingGridX) E1(landingGridY) E1(launchDirection)
+// 变长部分 2 (仅 shape == 1 或 shape == 2 时, +1B, 位于 shape 之后):
+//   E1(shapeParam) — shape==1 时为 beamDirection (0..3); shape==2 时为 rectDistance (1..14)
+//
+//   - contextSlot       (第1栏 E2): 客户端 `CGameContext` 在 `CGameStage` 里的槽号 (0/1/2), 客户端
+//                                   `sub_54A3EA` 开头用 `sub_532BC3(ctx)` 校验, 不符整包丢弃。
+//   - bombToken         (第3栏 E4): 必须原样回显客户端 op 106 传来的 bombToken (slotId + 8*k), 怪物泡复用 bombId
+//   - sourceX/Y         (第4/5栏 E4): 水泡起飞点像素坐标 (地图脚本炮台用, 玩家/怪物泡为 0)
+//   - isSquareExplosion (第8栏 E1): `sub_54A3EA` 的 `v10` → `sub_45AB56` 写入 `bomb+104`。
+//                                   非 0 时 `sub_564622` (L303865) 走实心方块爆炸 (半径 = power),
+//                                   优先级高于 `shape == 1/2` (故使用原生水柱/空心矩形时须为 0)。
+//   - bombFlags         (第9栏 E1): 低 4 位 = 威力, 0x20 = 带落点飞行, 0x40 = 怪物泡贴图, 0x80 = 特殊
+//   - bombId            (E2): 服务端分配的水泡 ID, 后续 S→C op 138 引爆时按此 ID 查找水泡
+//   - initialState      (E2): 客户端读出后不参与建泡, 地图脚本原样透传, 玩家/怪物泡恒 0
+//   - shape             (末尾 E1): 0 = 常规(十字/实心方块), 1 = 单向水柱, 2 = 空心矩形框
 fun SetBomberEvent(
     slotId: Int,
     originGridX: Int,
@@ -46,14 +52,16 @@ fun SetBomberEvent(
     bombToken: Int = slotId,
     bombId: Int = bombToken,
     contextSlot: Int = 0,
-    reservedField: Int = 0,
+    isSquareExplosion: Int = 0,
     bombFlags: Int = 1,
     landingGridX: Int = originGridX,
     landingGridY: Int = originGridY,
     launchDirection: Int = 0,
     sourceX: Int = 0,
     sourceY: Int = 0,
-    initialState: Int = 0
+    initialState: Int = 0,
+    shape: Int = BOMB_SHAPE_NORMAL,
+    shapeParam: Int = 0,
 ) = PKT {
     Encode2(contextSlot)
     Encode1(slotId)
@@ -62,7 +70,7 @@ fun SetBomberEvent(
     Encode4(sourceY)
     Encode1(originGridX)
     Encode1(originGridY)
-    Encode1(reservedField)
+    Encode1(isSquareExplosion)
     Encode1(bombFlags)
     if (bombFlags and bombFlagLaunched != 0) {
         Encode1(landingGridX)
@@ -71,5 +79,8 @@ fun SetBomberEvent(
     }
     Encode2(bombId)
     Encode2(initialState)
-    Encode1(0)
+    Encode1(shape)
+    if (shape == BOMB_SHAPE_BEAM || shape == BOMB_SHAPE_HOLLOW_RECT) {
+        Encode1(shapeParam)
+    }
 }

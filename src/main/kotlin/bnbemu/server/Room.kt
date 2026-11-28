@@ -3,6 +3,7 @@ package bnbemu.server
 import bnbemu.ServerConfig
 import bnbemu.domain.MAX_SESSION_SLOTS
 import bnbemu.data.MapCatalog
+import bnbemu.data.MapRef
 import bnbemu.domain.CharacterRules
 import bnbemu.domain.PlayerProfile
 import bnbemu.netty.ClientSocket
@@ -12,6 +13,7 @@ import bnbemu.packet.ClientStage
 import bnbemu.packet.room.PracticeSetSlotAI
 import bnbemu.packet.room.PracticeSlotReady
 import bnbemu.packet.lobby.SESSION_TYPE_BATTLE
+import bnbemu.packet.lobby.SESSION_TYPE_MONSTER
 import bnbemu.packet.battle.BackToRoom
 import bnbemu.packet.battle.GameResultSlotSnapshot
 import bnbemu.packet.room.SetPlayer
@@ -28,6 +30,9 @@ class Room {
 
     val slots = Array(8) { Slot() }
     var mapId = 89
+    /** 当前对局实际加载的棋盘 mapId（怪物模式换盘推进 1→2→3 时随小关递增，而 [mapId] 保持第 1 小关不变）。 */
+    @Volatile
+    var activeMapId = mapId
     var themeId = 0
 
     /** 默认战斗配置；每次开局创建 [BattleSession] 时传入快照。 */
@@ -73,9 +78,59 @@ class Room {
     val isAIBattle: Boolean
         get() = sessionType == SESSION_TYPE_BATTLE
 
+    val isMonsterMode: Boolean
+        get() = sessionType == SESSION_TYPE_MONSTER
+
     fun chiefSlotIndex(): Int =
         slots.indexOfFirst { it.isHuman && (it.state.toInt() and FLAG_CHIEF) != 0 }
             .takeIf { it >= 0 } ?: 0
+
+    /**
+     * 解析客户端上报的真人槽位（支持同一 TCP 连接挂 1P/2P，并兼容单人房 `255`/`65535` 哨兵值）。
+     */
+    fun resolveHumanSlot(client: ClientSocket, reportedSlot: Int): Int? {
+        val owned = slots.indices.filter { slots[it].isHuman && slots[it].client === client }
+        if (reportedSlot in owned) return reportedSlot
+        if ((reportedSlot == 255 || reportedSlot == 65535) && owned.size == 1) return owned.single()
+        return null
+    }
+
+    /**
+     * 按怪物模式 (`sessionType == 14`) 布局初始化 4 个槽位（该模式只有4个，不是8个）：
+     *   - 0 号槽：真人房主 (`FLAG_CHIEF`)
+     *   - 1..3 号槽：默认封闭 (`FLAG_CLOSED`, `isAI = false`，绝不放 AI 机器人)
+     */
+    fun setupMonsterSlots(
+        player: PlayerProfile?,
+        client: ClientSocket? = null,
+        requestedBombers: List<Int> = emptyList(),
+    ) {
+        if (player != null) {
+            val requestedBomber = requestedBombers.firstOrNull() ?: player.bomber
+            val chosenBomber = if (requestedBomber in 0..15) requestedBomber else player.bomber
+            val effectiveBomber = CharacterRules.resolveEffectiveBomber(chosenBomber, player)
+            PlayerService.selectBomber(player.userId, effectiveBomber)
+
+            slots[0].apply {
+                assignHuman(player.userId, client)
+                isAI = false
+                state = FLAG_CHIEF
+                bomber = effectiveBomber
+                color = 0
+            }
+        }
+
+        for (i in 1..3) {
+            slots[i].apply {
+                clearHuman()
+                isAI = false
+                state = FLAG_CLOSED
+                aILevel = 0
+                bomber = 0
+                color = 0
+            }
+        }
+    }
 
     /**
      * 按激战模式 (sessionType=16) 布局初始化 8 个槽位:
@@ -185,19 +240,25 @@ class Room {
      * 参战名单与配置都在这一刻定格 ([BattleSession] 持有副本)：上一局的炸弹/推箱/去重表/结算标志
      * 全部随旧会话丢弃，重开一局不会把残留的泡带进新局。
      */
-    fun startGame(): BattleSession {
+    fun startGame(loadedMapId: Int = mapId): BattleSession {
         val newBattle = synchronized(battleLock) {
             battle?.destroy()
+            activeMapId = loadedMapId
             val initialSlots = Array(MAX_SESSION_SLOTS) { idx ->
                 val s = slots[idx]
                 BattleSlotState(slotId = idx, isHuman = s.isHuman, isAI = s.isAI)
             }
+            val monsterStage = if (isMonsterMode) MapCatalog.monsterStageOf(loadedMapId) else null
+            val sessionConfig = battleConfig.copy()
+            if (monsterStage != null && sessionConfig.matchTimeoutMs == BattleConfig.DEFAULT_MATCH_TIMEOUT_MS) {
+                sessionConfig.matchTimeoutMs = monsterStage.playTimeMs
+            }
             BattleSession(
                 executor = executor,
-                config = battleConfig.copy(),
-                // 局内包首栏的「context 槽号」在这里定格: 普通对局 0; 将来支持怪物玩法 boss 关
-                // (客户端 mode == 14) 时改成 BATTLE_CONTEXT_MONSTER, 否则客户端会丢包。
-                contextSlot = BATTLE_CONTEXT_NORMAL,
+                config = sessionConfig,
+                // 客户端 sub_55596B 实证: sessionType == 14 时全关卡（无论普通小关还是 Boss 关）
+                // CGameContext 槽号恒为 BATTLE_CONTEXT_MONSTER (2)，普通对局恒为 0。
+                contextSlot = if (isMonsterMode) BATTLE_CONTEXT_MONSTER else BATTLE_CONTEXT_NORMAL,
                 initialSlots = initialSlots,
                 broadcastAll = { packets -> BC(*packets) },
                 clientsProvider = { uniqueClients },
@@ -206,8 +267,18 @@ class Room {
                     settleMatch(outcome, expGained, lucciGained)
                 },
                 onReturnToRoom = { session -> backToRoomFromBattle(session) },
-            ).also {
-                battle = it
+            ).also { session ->
+                if (monsterStage != null) {
+                    session.monster = MonsterBattleController(
+                        battle = session,
+                        initialMapId = loadedMapId,
+                        initialStage = monsterStage,
+                        chiefSlotProvider = { chiefSlotIndex() },
+                        resolveHumanSlotProvider = { client, reported -> resolveHumanSlot(client, reported) },
+                        onBoardChanged = { nextRef -> activeMapId = nextRef.mapId },
+                    )
+                }
+                battle = session
             }
         }
         // EN: 对局推进完全由客户端本地 AI (CAIPlayer / CAIGoal*) 与本地时钟驱动,
@@ -414,5 +485,10 @@ class Room {
 
         /* 激战模式的特殊NPC */
         fun isBattleNpcBomber(bomber: Int): Boolean = bomber in 20..25
+
+        /** 怪物模式默认首关（优先 `MonPen01`，确保落在正式怪物分组且具备 `<StageClearScript>`）。 */
+        fun defaultMonsterMap(): MapRef? =
+            MapCatalog.refByName("MonPen01")?.takeIf { MapCatalog.monsterStageOf(it.mapId) != null }
+                ?: MapCatalog.refs.firstOrNull { MapCatalog.monsterStageOf(it.mapId) != null }
     }
 }

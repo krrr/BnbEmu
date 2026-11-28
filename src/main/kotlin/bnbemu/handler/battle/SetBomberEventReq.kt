@@ -15,12 +15,12 @@ import org.tinylog.kotlin.Logger
 // 触发机制: 角色 (玩家 Slot 0 或 AI Slot 1~7) 放置水泡时，先在本地分配待确认水泡并生成全局唯一 bombToken (slotId + 8*k)，随后发出本包。
 // 载荷结构:
 // 定长部分 (11B) = E2(contextSlot) E1(slotId) E4(bombToken)
-//                   E1(originGridX) E1(originGridY) E1(reservedField) E1(bombFlags)
+//                   E1(originGridX) E1(originGridY) E1(isSquareExplosion) E1(bombFlags)
 //   · contextSlot   : 客户端 `CGameContext` 在 `CGameStage` 里的槽号 (普通对局 0)。op 139 开头
 //                     用 `sub_532BC3(ctx)` 校验, 不符整包丢弃, 所以必须原样回显。
 //   · bombToken     : 客户端待确认水泡令牌 (0x0044BFE0: slotId + 8*k)
 //   · originGridX/Y : 发射者(角色)所在格, 坦克炮泡这里是炮口而非落点
-//   · reservedField : 客户端 v6+36 保留栏 (sub_539A4B 的 E1(*(v6+36))), 接收侧读出即丢弃
+//   · isSquareExplosion : 客户端 v6+36 保留栏 (sub_539A4B 的 E1(*(v6+36)))
 //   · bombFlags     : 低 4 位 = 威力; 0x80 / 0x40 / 0x20 是 sub_539A4B 按队列状态置位的特性位
 // 变长部分 (bombFlags & 0x20, 即发射型/坦克水泡, +5B → 16B):
 //   E1(landingGridX) E1(landingGridY) E1(launchDirection) E2(flightRange)
@@ -59,7 +59,7 @@ val SetBomberEventReq = PKTHandler { c ->
     val bombToken = Decode4
     val originGridX = Decode1
     val originGridY = Decode1
-    val reservedField = Decode1
+    val isSquareExplosion = Decode1
     val bombFlags = Decode1
 
     val isLaunchedBomb = (bombFlags and bombFlagLaunched) != 0
@@ -106,7 +106,7 @@ val SetBomberEventReq = PKTHandler { c ->
         // 客户端 op 139 会校验这个 context 槽号 (sub_54A3EA 开头), 不符整包丢弃。
         // 本包必须原样回显; 炮台等没有请求包可回显的消息用对局级 BattleSession.contextSlot,
         contextSlot = contextSlot,
-        reservedField = reservedField,
+        isSquareExplosion = isSquareExplosion,
         bombFlags = bombFlags,
         landingGridX = landingGridX,
         landingGridY = landingGridY,

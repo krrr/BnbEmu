@@ -52,7 +52,7 @@ BomberActionReq: 112
 ThrowDartReq: 121
 SetEffectReq: 147
 DropObstacleReq: 148
-EventItemReq: 149
+SyncErrorReportReq: 149
 DestroyBoxReq: 126
 DrillReq: 124
 MapScriptBombReq: 133
@@ -61,7 +61,20 @@ GenerateGhostReq: 151
 DestroyGhostReq: 152
 #LapFinishedReq: 154
 BoxItemSpawnReport: 154
-LapInfoReq: 155
+# ----- monster / stage clear (mode 14) -----
+MonsterDamageReq: 114
+MonsterFinishReq: 115
+MonsterStateReq: 116
+MonsterAttackReq: 117
+StageClearAliveReq: 127
+MonsterBoardLoadedReq: 131
+MonsterCreateReq: 136
+MonsterDestroyReq: 137
+MonsterDropItemReq: 141
+# 原佔位 LapInfoReq: 155 無實作，真實 EN op 155 為機器人雷射 (sub_58DCC7)
+MonsterLaserReq: 155
+MonsterKickReq: 168
+MonsterHitReq: 169
 #AirplaneReq: 156
 NpcEventReq: 156
 CreateObjReq: 158
@@ -97,11 +110,7 @@ RegisterSessionKey: 297
 UserStageSyncReq: 302
 SelfUserInfoReq: 310
 CreateSessionReq: 75
-# 大廳聊天發言 (CA.exe 0x4EB856 push 0x12; body = E1(chatType) E1(1) DecodeStr(令牌化文字))
-# 原 TW/CN/JP 表把聊天放在 op 25, 真實 EN 客戶端發的是 op 18
 # ⚠️ 目前只確認 C→S 方向。S→C 的「顯示聊天」opcode 尚未確定:
-#    曾誤以為是 op 18 (依據 0x4EDBBE), 但該函數在全 exe 中無任何引用 (死代碼),
-#    CStage 大廳分派鏈 (0x502B38 起) 也不含 0x12 分支 → 需要真實伺服器聊天抓包才能釘死。
 ChatMsg: 18
 UserInfoReq: 73
 MyPageReq: 301

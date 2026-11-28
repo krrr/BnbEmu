@@ -86,12 +86,14 @@ fun GameResult(
     lucciGained: Int = 100,  // +152 本局获得金币
     /** 本局结算名册（必填）。抓包基准见测试侧 `CaptureFixtures.OP150_PRACTICE_SLOTS`。 */
     slots: List<GameResultSlotSnapshot>,
+    /** 怪物模式最终 Boss 关胜利时置 true（header[0]=1，触发 "MISSION PERFECT!!" 印章）；其余场景恒 false。 */
+    missionClear: Boolean = false,
 ) = PKT {
     val isDraw = winnerTeam < 0 || winnerTeam == WINNER_TEAM_DRAW
     val headerWinnerTeam = if (isDraw) WINNER_TEAM_DRAW else winnerTeam
 
     // 1. Header (11 字节)
-    Encode1(0)                   // gameType: 必须 0，非 0 会插 "MISSION PERFECT!!" 印章
+    Encode1(if (missionClear) 1 else 0) // gameType: 0 = 普通/中间关/失败; 1 = 怪物模式通关印章
     Encode1(headerWinnerTeam)    // winnerTeam / slot (0=玩家胜, 1=AI 胜, 0xFF=平局)
     Encode1(0)                   // unk3
     Encode1(0)                   // unk4 (0 = 第 4 列显示 KILLS/SAVES)

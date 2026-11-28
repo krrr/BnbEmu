@@ -35,6 +35,12 @@ data class BattleConfig(
     var bombMoveDedupeWindowMs: Long = 400L,
     /** 飞镖命中引爆的最大延时上限 (ms); 超过它客户端动画早已播完, 钳住避免迟到的引爆包 */
     var dartDetonationMaxDelayMs: Long = 500L,
+    /**
+     * 怪物模式中间小关（1→2、2→3）通关结算后等待切图换盘（S169 mode=2）的延时覆写 (ms)。
+     * `< 0` 表示使用关卡 XML `<mapscriptoption gameEndWaitTime="..."/>`（默认 5000ms）；
+     * 单元测试可设为 0 或极小值加速验证换盘流程。
+     */
+    var monsterStageTransitionDelayOverrideMs: Long = -1L,
     // ---- 结算奖励（op 150 GameResult） ----
     // EXP 是「等级进度千分比」：1000 = 100.0%，结果页会从 0.0% 涨到这个值
     // （客户端 0x53E617 = min(+124 + 涨条动画, +128)，见 packet/room/GameResult.kt）。
@@ -46,4 +52,8 @@ data class BattleConfig(
     var winLucci: Int = 120,
     var loseLucci: Int = 40,
     var drawLucci: Int = 60,
-)
+) {
+    companion object {
+        const val DEFAULT_MATCH_TIMEOUT_MS = 180_000L
+    }
+}

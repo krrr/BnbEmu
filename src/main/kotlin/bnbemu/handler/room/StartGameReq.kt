@@ -11,6 +11,7 @@ import bnbemu.packet.battle.GameStart
 import bnbemu.packet.battle.GameStartPeer
 import bnbemu.packet.room.SetPlayer
 import bnbemu.packet.lobby.SESSION_TYPE_BATTLE
+import bnbemu.packet.lobby.SESSION_TYPE_MONSTER
 import bnbemu.packet.lobby.SESSION_TYPE_PRACTICE
 import bnbemu.packet.battle.GameStartMapInfo
 import bnbemu.packet.battle.GameStartSlotConfig
@@ -73,17 +74,32 @@ val StartGameReq = PKTHandler { c ->
 
     val room = Room.current ?: return@PKTHandler
 
-    if (mapId != room.mapId || themeId != room.themeId) {
-        Logger.warn("[StartGame] mapId or themeId mismatch (req=$mapId/$themeId, room=${room.mapId}/${room.themeId})")
+    // 怪物模式每次从房间开局都归位到所属 3 关组的第 1 小关（防止房间残留第 2/3 小关）
+    var effectiveMapId = mapId
+    var effectiveThemeId = themeId
+    if (room.isMonsterMode) {
+        val requestedName = MapCatalog.ref(mapId)?.name
+        val firstBoard = requestedName?.let { MapCatalog.firstMonsterBoard(it) }
+        if (firstBoard != null && firstBoard.mapId != mapId) {
+            Logger.info("[StartGame] 怪物模式首关归位: $requestedName($mapId) -> ${firstBoard.name}(${firstBoard.mapId})")
+            effectiveMapId = firstBoard.mapId
+            effectiveThemeId = firstBoard.themeId
+            room.mapId = effectiveMapId
+            room.themeId = effectiveThemeId
+        }
     }
 
-    val mapName = MapCatalog.ref(mapId)?.name ?: FALLBACK_MAP_NAME
-    Logger.info("StartGame. mapId: $mapId, mapName: $mapName")
+    if (effectiveMapId != room.mapId || effectiveThemeId != room.themeId) {
+        Logger.warn("[StartGame] mapId or themeId mismatch (req=$effectiveMapId/$effectiveThemeId, room=${room.mapId}/${room.themeId})")
+    }
 
-    val mapLimit = MapCatalog.maxPlayerOf(mapId)
+    val mapName = MapCatalog.ref(effectiveMapId)?.name ?: FALLBACK_MAP_NAME
+    Logger.info("StartGame. mapId: $effectiveMapId, mapName: $mapName")
+
+    val mapLimit = MapCatalog.maxPlayerOf(effectiveMapId)
     if (room.activeSlotCount > mapLimit) {
         // 应该不会发生，客户端有检查
-        Logger.warn("[StartGame] mapId=$mapId 人数上限 $mapLimit, 房间人数超限")
+        Logger.warn("[StartGame] mapId=$effectiveMapId 人数上限 $mapLimit, 房间人数超限")
     }
 
     // 開局名冊 = 房間裡真正參戰的槽位 (op 89 / 选图上限 踢掉的 AI 已被清成 user=null / isAI=false)。
@@ -91,11 +107,12 @@ val StartGameReq = PKTHandler { c ->
     // 「服務端按 6 個 AI 判勝負、客戶端卻照 op112 的 8 槽名冊生成 7 個 AI」的錯位。
     // 異常防護: 若房間槽位尚未初始化 (例如非練習房流程), 退回舊的 8 槽名冊,
     // 避免給客戶端發 slotCount=0 導致對局載入失敗。
-    val activeSlots = room.slots.indices.filter { i -> room.slots[i].isHuman || room.slots[i].isAI }
-        .ifEmpty { (0..7).toList() }
+    val activeSlots = room.slots.indices.filter { i ->
+        if (room.isMonsterMode) room.slots[i].isHuman else (room.slots[i].isHuman || room.slots[i].isAI)
+    }.ifEmpty { if (room.isMonsterMode) listOf(room.chiefSlotIndex()) else (0..7).toList() }
     Logger.info("StartGame. activeSlots=$activeSlots (AI=${activeSlots.count { room.slots[it].isAI }})")
 
-    val spawnPositions = assignSpawnPositions(mapId, activeSlots)
+    val spawnPositions = assignSpawnPositions(effectiveMapId, activeSlots)
     val slotConfigs = activeSlots.map { i ->
         val slot = room.slots.getOrNull(i)
         val rawBomber = slot?.bomber?.toInt()
@@ -110,15 +127,23 @@ val StartGameReq = PKTHandler { c ->
         GameStartSlotConfig(slotIdx = i, spawnPos = spawn, bomber = bomberId, team = team)
     }
 
+    val gameOptions = when {
+        room.isMonsterMode -> SESSION_TYPE_MONSTER
+        room.isAIBattle -> SESSION_TYPE_BATTLE
+        else -> SESSION_TYPE_PRACTICE
+    }
+    val monsterStage = if (room.isMonsterMode) MapCatalog.monsterStageOf(effectiveMapId) else null
+    val timerASec = monsterStage?.let { (it.playTimeMs / 1000L).toInt() } ?: 180
+
     val player = c.player
     c.send(
         StartGameResult(),  // op 111 开局结果码 = 0 (成功)。
         GameStartMapInfo(
             randomSeed = Random.nextInt(0x7FFFFFFF),
-            mapId = mapId,
-            themeId = themeId,
+            mapId = effectiveMapId,
+            themeId = effectiveThemeId,
             mapName = mapName,
-            gameOptions = if (room.isAIBattle) SESSION_TYPE_BATTLE else SESSION_TYPE_PRACTICE,
+            gameOptions = gameOptions,
             // 名冊唯一入口: 誰參戰 / 出生點 / 角色 / 隊伍全部在這裡定死 (見 GameStartSlotConfig)。
             // 出生點數量由地圖決定（4 人图只有 0..3），按参战槽顺序分配，见 assignSpawnPositions
             slotConfigs = slotConfigs,
@@ -135,15 +160,23 @@ val StartGameReq = PKTHandler { c ->
         // 本模擬器只有 TCP, 所有 UDP 端點填 0 —— 客戶端 0x00789FD0 對 ip/port 為 0 直接跳過,
         // 不會去連抓包裡那台早已下線的 66.135.19.7。
         GameStart(
-            // 兩個秒級時長沿用抓包實測值: A=180s (3 分鐘) / B=0。CA.exe 收下後只把它們
-            // ×1000 寫進 +13808/+13812, 之後從不讀取, 故對行為沒有影響 (語義未定案,
-            // 真端同位置是 ghostStart/ghostFreq, 參考分支按「對局時限」使用)。
-            timerASec = 180,
+            timerASec = timerASec,
             timerBSec = 0,
             peers = activeSlots.map { GameStartPeer(it) },
         ),
     )
 
     // 啟動對局主循環 (onTick: 水泡倒计时与 op 138 爆炸状态同步)
-    room.startGame()
+    val battle = room.startGame(loadedMapId = effectiveMapId)
+
+    // 怪物模式第 1 小关：GameStart (op 136) 已在 CGameStage 内完成建怪并注册进 CNetObjectMan，
+    // 紧接着立即下发 S→C op 178 MonsterControl 授予房主初始怪控制权（绝不等待 C149 报错包）。
+    val controlPackets = battle.monster?.grantInitialControlPackets().orEmpty()
+    if (controlPackets.isNotEmpty()) {
+        if (room.uniqueClients.any()) {
+            room.BC(*controlPackets.toTypedArray())
+        } else {
+            c.send(*controlPackets.toTypedArray())
+        }
+    }
 }

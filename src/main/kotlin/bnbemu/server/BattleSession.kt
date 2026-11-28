@@ -19,10 +19,12 @@ import bnbemu.packet.battle.InitGameResult
 import bnbemu.packet.battle.MAP_SCRIPT_BOMB_ID_FIRST
 import bnbemu.packet.battle.MAP_SCRIPT_BOMB_ID_LAST
 import bnbemu.packet.battle.MAP_SCRIPT_SLOT
+import bnbemu.packet.battle.MONSTER_BOMB_SLOT
 import bnbemu.packet.battle.MapScriptBomb
 import bnbemu.packet.battle.MovableBoxMove
 import bnbemu.packet.battle.ReviveBomber
 import bnbemu.packet.battle.SetBombState
+import bnbemu.packet.battle.SetBombStateBatch
 import bnbemu.packet.battle.SetBomberState
 import bnbemu.packet.battle.WINNER_TEAM_AI
 import bnbemu.packet.battle.WINNER_TEAM_DRAW
@@ -146,6 +148,7 @@ class BattleSession(
         DEATH_REPORT,
         LAST_TEAM_STANDING,
         TIMEOUT,
+        MONSTER_CLEAR,
     }
 
     // 可移动箱子 (CGOTileMovableBox) 的最新推动状态。
@@ -208,7 +211,13 @@ class BattleSession(
     val activeSlotCount: Int
         get() = slotStates.count { it.hasSeat }
 
+    /** 怪物模式（StageClear / Mode 14）控制器；仅怪物模式对局实例化，随本会话销毁自动释放。 */
+    @Volatile
+    var monster: MonsterBattleController? = null
+        internal set
+
     private var nextBombId = 0
+    private var nextMonsterBombId = MONSTER_BOMB_ID_FIRST
     val bombs = mutableListOf<Bomb>()
     var lastAirplaneTime = 0L
 
@@ -219,6 +228,7 @@ class BattleSession(
     private val dartDetonations = ConcurrentHashMap<Int, DartDetonation>()
     private val dartDetonationFutures: MutableSet<ScheduledFuture<*>> = ConcurrentHashMap.newKeySet()
     private val launchedBombActivations = ConcurrentHashMap<Int, ScheduledFuture<*>>()
+    private val managedFutures: MutableSet<ScheduledFuture<*>> = ConcurrentHashMap.newKeySet()
 
     @Volatile
     private var matchStartTimeMs = 0L
@@ -326,15 +336,29 @@ class BattleSession(
         }
 
         if (stateChanged.isNotEmpty() && !isDestroyed) {
-            stateChanged.forEach { bomb ->
-                broadcast(SetBombState(bomb.id, bomb.state))
+            val monsterExplosions = stateChanged.filter { it.ownerSlotId == MONSTER_BOMB_SLOT && it.state == 0 }
+            if (monsterExplosions.isNotEmpty()) {
+                broadcast(SetBombStateBatch(monsterExplosions.map { it.id }))
+            }
+            stateChanged
+                .filterNot { it.ownerSlotId == MONSTER_BOMB_SLOT && it.state == 0 }
+                .forEach { bomb ->
+                    broadcast(SetBombState(bomb.id, bomb.state))
+                }
+
+            // 怪物模式海豹系冲击即爆飞行泡（landingFuseMs == 0）：先发 state=1 结束飞行并占格，
+            // 再于同 tick 立即发 state=0 引爆（飞行中直接发 state=0 客户端会忽略）。
+            val impactFused = stateChanged.filter {
+                it.ownerSlotId == MONSTER_BOMB_SLOT && it.state == 1 && it.landingFuseMs == 0L
+            }
+            if (impactFused.isNotEmpty() && !isDestroyed) {
+                synchronized(bombs) {
+                    impactFused.forEach { it.updateState(now) }
+                    bombs.removeAll(impactFused.toSet())
+                }
+                broadcast(SetBombStateBatch(impactFused.map { it.id }))
             }
         }
-    }
-
-    // 客户端上报槽位事件 (Opcode 149) 时触发
-    fun onEventItem(slotId: Int, token: Int, action: Int, param: Int) {
-        if (isDestroyed) return
     }
 
     // CGameSession::OnRequestAirplane
@@ -574,6 +598,7 @@ class BattleSession(
     //   在缓冲期内若另一方也全灭则升级为平局。
     //   顺序 op 169 InitGameResult → op 150 GameResult（缺 169/150 不弹结算窗）。
     fun onBomberDie(slotId: Int) {
+        if (monster?.isTransitioningOrLoading == true) return
         if (slotId !in slotStates.indices) return
         val slot = slotStates[slotId]
         synchronized(matchLock) {
@@ -625,6 +650,8 @@ class BattleSession(
     // ⚠️ 不要再给落败槽位广播 S→C op 159: 客户端本地阵亡时已经播过死亡动画 (OnDie 是本地函数),
     //    服务端只是"不知道", 再来一条 159 会让死亡动作重播。
     fun onLastTeamStanding(slotId: Int) {
+        // 怪物模式（Mode 14）胜负完全由怪物通关目标决定，不走客户端"只剩一队"（否则 2P 开局即误判胜利）
+        if (monster != null) return
         if (slotId !in slotStates.indices) return
         synchronized(matchLock) {
             if (phase != Phase.RUNNING || gameOverSent) return
@@ -653,12 +680,14 @@ class BattleSession(
         }
     }
 
-    /** 对局超时（默认 3 分钟 = 180,000ms），与真端 CGameSession::Update 一致直接判平局结束。 */
+    /** 对局超时（默认 3 分钟 = 180,000ms，怪物模式默认 120,000ms）：普通/练习判平局，怪物模式判失败。 */
     fun onMatchTimeout() {
         synchronized(matchLock) {
             if (phase != Phase.RUNNING || gameOverSent) return
+            if (monster?.isTransitioningOrLoading == true) return
+            val timeoutOutcome = if (monster != null) MatchOutcome.AI_WIN else MatchOutcome.DRAW
             emitMatchResultLocked(
-                outcome = MatchOutcome.DRAW,
+                outcome = timeoutOutcome,
                 winnerSlot = -1,
                 trigger = MatchEndTrigger.TIMEOUT,
                 detail = "对局超时(${config.matchTimeoutMs}ms)"
@@ -698,7 +727,7 @@ class BattleSession(
             }
             val winnerSlot = when (outcome) {
                 MatchOutcome.HUMAN_WIN -> humanAlive.first()
-                MatchOutcome.AI_WIN -> enemyAlive.first()
+                MatchOutcome.AI_WIN -> enemyAlive.firstOrNull() ?: -1
                 MatchOutcome.DRAW -> -1
             }
 
@@ -766,6 +795,7 @@ class BattleSession(
                 MatchOutcome.DRAW -> config.drawLucci
             }
             val settlement = onMatchFinished(finalOutcome, expGained, lucciGained)
+            val missionClear = trigger == MatchEndTrigger.MONSTER_CLEAR && finalOutcome == MatchOutcome.HUMAN_WIN
             broadcast(
                 InitGameResult(mode = 0, mapId = 0),
                 GameResult(
@@ -775,6 +805,7 @@ class BattleSession(
                     expAfter = settlement?.expAfter ?: expGained,
                     lucciGained = settlement?.lucciGained ?: lucciGained,
                     slots = resultSlotsProvider(),
+                    missionClear = missionClear,
                 )
             )
             // 结算后停掉对局主循环 (水泡倒计时), 与客户端离开棋盘同步
@@ -1098,6 +1129,104 @@ class BattleSession(
         }
     }
 
+    // ========================================================================
+    // 怪物模式内部支撑方法（供 MonsterBattleController 调用）
+    // ========================================================================
+
+    internal fun isActiveClient(client: ClientSocket): Boolean =
+        clientsProvider().any { it === client }
+
+    internal fun resultSlots(): List<GameResultSlotSnapshot> = resultSlotsProvider()
+
+    internal fun settleIntermediateStage(): MatchSettlement? =
+        onMatchFinished(MatchOutcome.HUMAN_WIN, config.winExpAfter, config.winLucci)
+
+    /** 怪物模式最终关通关胜利（header[0] missionClear = true）。 */
+    internal fun finishMonsterVictory(winnerSlot: Int, detail: String = "") {
+        synchronized(matchLock) {
+            emitMatchResultLocked(
+                outcome = MatchOutcome.HUMAN_WIN,
+                winnerSlot = winnerSlot,
+                trigger = MatchEndTrigger.MONSTER_CLEAR,
+                detail = detail,
+            )
+        }
+    }
+
+    /** 分配一个尚未在活跃炸弹列表中的怪物泡 ID（0x6000..0x7FFF），供瞬爆泡使用。 */
+    internal fun allocateMonsterBombId(): Int? = synchronized(bombs) {
+        if (isDestroyed) return null
+        repeat(MONSTER_BOMB_ID_LAST - MONSTER_BOMB_ID_FIRST + 1) {
+            val candidate = nextMonsterBombId
+            nextMonsterBombId = if (candidate >= MONSTER_BOMB_ID_LAST) MONSTER_BOMB_ID_FIRST else candidate + 1
+            if (bombs.none { it.id == candidate }) return candidate
+        }
+        null
+    }
+
+    /** 同步分配并登记一颗怪物泡（slot = 9，ID 区间 0x6000..0x7FFF）。 */
+    internal fun registerMonsterBomb(
+        row: Int,
+        col: Int,
+        isMoving: Boolean = false,
+        fuseMs: Long = config.bombFuseMs,
+        landingFuseMs: Long = 2000L,
+    ): Int? = synchronized(bombs) {
+        if (isDestroyed) return null
+        val id = allocateMonsterBombId() ?: return null
+        val bomb = Bomb(
+            id = id,
+            ownerSlotId = MONSTER_BOMB_SLOT,
+            pos = (row shl 8) or col,
+            bombAttr = 0,
+            isSpecial = false,
+            isMoving = isMoving,
+            gridX = row,
+            gridY = col,
+            expireAt = System.currentTimeMillis() + fuseMs.coerceAtLeast(0L),
+            landingFuseMs = landingFuseMs,
+        )
+        bombs += bomb
+        id
+    }
+
+    /** 调度受本会话生命周期托管的延时任务；会话 [destroy] 时自动取消，防止定时泄漏。 */
+    internal fun scheduleManagedTask(delayMs: Long, task: () -> Unit): ScheduledFuture<*>? {
+        if (isDestroyed) return null
+        var scheduled: ScheduledFuture<*>? = null
+        scheduled = executor.schedule({
+            scheduled?.let { managedFutures.remove(it) }
+            if (!isDestroyed) task()
+        }, delayMs.coerceAtLeast(0L), TimeUnit.MILLISECONDS)
+        managedFutures.add(scheduled)
+        return scheduled
+    }
+
+    /** 怪物模式中间小关通关后暂停仿真循环并清空残留炸弹，保留会话用于无缝换盘（不发 BackToRoom）。 */
+    internal fun pauseForStageTransition() {
+        synchronized(matchLock) {
+            tickFuture?.cancel(false)
+            tickFuture = null
+        }
+        clearSimulationState()
+    }
+
+    /** 怪物模式客户端回 `C131` 换盘加载完毕后重启仿真循环并重置新一关的时限与玩家存活态。 */
+    internal fun resumeAfterStageTransition(newMatchTimeoutMs: Long) {
+        synchronized(matchLock) {
+            if (phase == Phase.DESTROYED) return
+            tickFuture?.cancel(false)
+            config.matchTimeoutMs = newMatchTimeoutMs
+            slotStates.forEach {
+                it.matchState = if (it.hasSeat) SlotMatchState.ALIVE else SlotMatchState.OUT_OF_MATCH
+            }
+            phase = Phase.RUNNING
+            matchStartTimeMs = System.currentTimeMillis()
+            val period = config.tickIntervalMs.coerceAtLeast(1L)
+            tickFuture = executor.scheduleAtFixedRate(::onTick, 0, period, TimeUnit.MILLISECONDS)
+        }
+    }
+
     /** 结算后停止对局仿真循环与水泡状态（保留 backToRoomFuture 等待自动回房）。 */
     fun stopSimulation() {
         synchronized(matchLock) {
@@ -1119,12 +1248,16 @@ class BattleSession(
             gameOverFuture = null
             backToRoomFuture = null
         }
+        managedFutures.forEach { it.cancel(false) }
+        managedFutures.clear()
+        monster = null
         clearSimulationState()
     }
 
     private fun clearSimulationState() {
         synchronized(bombs) { bombs.clear() }
         nextScriptBombId = MAP_SCRIPT_BOMB_ID_FIRST
+        nextMonsterBombId = MONSTER_BOMB_ID_FIRST
         movableBoxes.clear()
         movableBoxSentAt.clear()
         bombMoves.clear()
@@ -1134,5 +1267,10 @@ class BattleSession(
         dartDetonationFutures.clear()
         launchedBombActivations.values.forEach { it.cancel(false) }
         launchedBombActivations.clear()
+    }
+
+    companion object {
+        const val MONSTER_BOMB_ID_FIRST = 0x6000
+        const val MONSTER_BOMB_ID_LAST = 0x7FFF
     }
 }

@@ -79,7 +79,19 @@ fun sendRoomEntryChain(c: ClientSocket, room: Room, init: Boolean = true) {
         c.send(PracticeSlotReady(slot, state = if (closed) 1 else 2))
     }
 
-    if (room.isAIBattle) {
+    if (room.isMonsterMode) {
+        // 怪物模式 (sessionType=14) 仅有真人槽位、无 AI 机器人：只为有人槽位回灌 114/104/105，不发 op 103。
+        repeat(4) { slot ->
+            val s = room.slots[slot]
+            if (!s.isHuman) return@repeat
+            val slotBomber = s.bomber.toInt()
+            c.send(
+                SetSlotFanfare(slot, bomber = slotBomber),
+                SetSlotColor(slot),
+                PracticeSetPlayer(slot, bomber = slotBomber),
+            )
+        }
+    } else if (room.isAIBattle) {
         val refSlot = room.chiefSlotIndex()
         repeat(8) { slot ->
             val s = room.slots[slot]

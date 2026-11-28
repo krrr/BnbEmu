@@ -18,6 +18,7 @@ val SelectMapReq = PKTHandler { c ->
         val room = Room.current ?: return@PKTHandler
         room.themeId = themeId
         room.mapId = mapId
+        room.activeMapId = mapId
         // 先回 op 108 解掉客户端的选图等待锁并刷新地图 UI, 再做人数上限调整。
         room BC SelectMap(result = 0, themeId = themeId, mapId = mapId)
         // 4 人图 (如 mapId=8 Wriggle01) 容不下练习房默认的 1 真人 + 7 AI:
@@ -29,6 +30,7 @@ val SelectMapReq = PKTHandler { c ->
         Logger.info("SelectMapReq (legacy 2B) -> mapId: $map")
         val room = Room.current ?: return@PKTHandler
         room.mapId = map
+        room.activeMapId = map
         room BC SelectMap(result = 0, themeId = 0, mapId = map)
         room.applyMapPlayerLimit(map)
     } else {

@@ -48,6 +48,15 @@ object MapCatalog {
         mapRecords.mapIndexed { i, r -> MapRef(i, r.name, r.sortOrder) }
     }
 
+    /** 图名 → 协议地图引用（首个匹配），供怪物模式默认图/三关组换盘查找。 */
+    private val refsByName: Map<String, MapRef> by lazy {
+        val out = LinkedHashMap<String, MapRef>(refs.size)
+        for (r in refs) {
+            out.putIfAbsent(r.name, r)
+        }
+        out
+    }
+
     /**
      * fxdynmapinfo 引用了、但没有对应 .bin 的图名。
      *
@@ -65,8 +74,34 @@ object MapCatalog {
     /** 协议 mapId → 地图引用（名字/主题，恒有）；越界返回 null。 */
     fun ref(mapId: Int): MapRef? = refs.getOrNull(mapId)
 
+    /** 图名 → 协议地图引用（flag==0 记录）；找不到返回 null。 */
+    fun refByName(name: String): MapRef? = refsByName[name]
+
     /** 协议 mapId → 地图模板；没有对应 .bin（随机按钮等）时返回 null。 */
     fun of(mapId: Int): MapTemplate? = ref(mapId)?.let { byName[it.name] }
+
+    /** 协议 mapId → 怪物关卡脚本元数据；非怪物图返回 null。 */
+    fun monsterStageOf(mapId: Int): MonsterStageSpec? = of(mapId)?.monsterStage
+
+    /**
+     * 怪物模式三关组内的下一小关引用（`MonPen01→MonPen02→MonPen03→null`）。
+     * 只有目标地图既存在于 `fxdynmapinfo.json`（有合法 `sort_order`）又包含 `<StageClearScript>` 时才返回。
+     */
+    fun nextMonsterBoard(mapName: String): MapRef? {
+        val nextName = MonsterStageSpec.nextBoardNameOf(mapName) ?: return null
+        if (byName[nextName]?.monsterStage == null) return null
+        return refByName(nextName)
+    }
+
+    /**
+     * 怪物模式三关组首关归位（`MonPen02`/`MonPen03` → `MonPen01`）。
+     * 若首关存在且包含 `<StageClearScript>` 则返回其 [MapRef]，否则返回 null。
+     */
+    fun firstMonsterBoard(mapName: String): MapRef? {
+        val firstName = MonsterStageSpec.firstBoardNameOf(mapName) ?: return null
+        if (byName[firstName]?.monsterStage == null) return null
+        return refByName(firstName)
+    }
 
     /** 人数上限；查不到时退回 8 槽（与真端缺模板时的 MAX_SESSION_SLOTS 兜底一致）。 */
     fun maxPlayerOf(mapId: Int): Int = of(mapId)?.maxPlayer ?: MAX_SESSION_SLOTS

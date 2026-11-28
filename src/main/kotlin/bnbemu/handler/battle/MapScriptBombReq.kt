@@ -67,7 +67,8 @@ val MapScriptBombReq = PKTHandler { c ->
         return@PKTHandler
     }
 
-    val template = MapCatalog.of(room.mapId)
+    val activeMapId = room.activeMapId
+    val template = MapCatalog.of(activeMapId)
     if (template != null && !template.hasMapScriptBombs) {
         Logger.warn("[MapScriptBombReq] ${template.name} 没有 <bomb> 脚本却收到 op 133, 忽略")
         return@PKTHandler
@@ -75,7 +76,7 @@ val MapScriptBombReq = PKTHandler { c ->
 
     battle.onMapScriptBombs(
         client = c,
-        mapId = room.mapId,
+        mapId = activeMapId,
         power = request.power,
         sourceX = request.sourceX,
         sourceY = request.sourceY,
