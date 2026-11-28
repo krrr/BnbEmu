@@ -165,7 +165,7 @@ class SetBomberEventTest {
         // 射到钉子/飞镖提前引爆 (onObjectHit 立刻从 bombs 移除) → 延时到点不得再发激活包
         runBombRequest(tankBombBody, beforePackets = { battle ->
             assertTrue(
-                battle.onObjectHit(targetObjectId = 999, gridX = 10, gridY = 12, delayMs = 0, broadcast = false),
+                battle.onBombHit(targetObjectId = 999, gridX = 10, gridY = 12, delayMs = 0, broadcast = false),
                 "按落点应能命中这颗泡"
             )
             assertFalse(battle.activateLaunchedBomb(40), "泡已被移除, 激活必须跳过")

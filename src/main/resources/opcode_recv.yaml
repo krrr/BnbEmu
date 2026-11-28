@@ -39,7 +39,7 @@ HostAskBanPlayerReq: 104
 RespondToBanPlayerReq: 105
 SetBomberEventReq: 106
 #PlayEmotionReq: 108
-ObjectHitReq: 108
+BombHitReq: 108
 PushMovableBoxReq: 109
 AILevelChangeReq: 88
 #TeamChat: 111

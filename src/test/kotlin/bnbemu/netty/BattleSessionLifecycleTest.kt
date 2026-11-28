@@ -4,14 +4,13 @@ import bnbemu.handler.battle.BombKickThrowReq
 import bnbemu.handler.battle.BomberActionReq
 import bnbemu.handler.battle.BoxItemSpawnReport
 import bnbemu.handler.battle.DrillReq
-import bnbemu.handler.battle.ObjectHitReq
+import bnbemu.handler.battle.BombHitReq
 import bnbemu.handler.battle.PushMovableBoxReq
 import bnbemu.handler.battle.SetBomberEventReq
 import bnbemu.domain.PlayerProfile
 import bnbemu.server.BattleSession
 import bnbemu.server.Bomb
 import bnbemu.server.Room
-import bnbemu.server.state
 import bnbemu.service.PlayerService
 import io.netty.buffer.Unpooled
 import io.netty.channel.embedded.EmbeddedChannel
@@ -72,7 +71,7 @@ class BattleSessionLifecycleTest {
 
         // 3. op 108 命中
         val hitBuf = Unpooled.wrappedBuffer("A7 75 5C 5F A5 09".toBA())
-        with(ObjectHitReq) { hitBuf.handle(cs) }
+        with(BombHitReq) { hitBuf.handle(cs) }
         assertEquals(0, hitBuf.readableBytes())
 
         // 4. op 109 推箱
@@ -132,12 +131,16 @@ class BattleSessionLifecycleTest {
         val battle = room.startGame()
         synchronized(battle.bombs) {
             battle.bombs += Bomb(40, 0, 0, 0, true).apply {
+                gridX = 3
+                gridY = 3
+            }
+            battle.bombs += Bomb(41, 0, 0, 0, false).apply {
                 gridX = 5
                 gridY = 5
             }
         }
         battle.scheduleLaunchedBombActivation(40)
-        battle.onObjectHit(targetObjectId = 999, gridX = 5, gridY = 5, delayMs = 80, broadcast = true)
+        battle.onBombHit(targetObjectId = 41, gridX = 5, gridY = 5, delayMs = 80, broadcast = true)
         assertTrue(battle.launchedBombActivationPending(40))
 
         ch.outboundMessages().clear()

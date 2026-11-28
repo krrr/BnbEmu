@@ -1,6 +1,6 @@
 package bnbemu.netty
 
-import bnbemu.handler.battle.ObjectHitReq
+import bnbemu.handler.battle.BombHitReq
 import bnbemu.server.Room
 import io.netty.buffer.Unpooled
 import org.junit.jupiter.api.AfterEach
@@ -10,7 +10,7 @@ import org.junit.jupiter.api.Assertions.assertSame
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 
-class ObjectHitReqTest {
+class BombHitReqTest {
 
     @BeforeEach
     fun clearBombs() {
@@ -25,10 +25,10 @@ class ObjectHitReqTest {
 
     @Test
     fun testOpcodeBinding() {
-        // 旧名 PlayEmotionReq: 108 已注释, 新条目 ObjectHitReq: 108 生效
-        assertEquals("ObjectHitReq", OpcodeManager.recvOps[108])
+        // 旧名 PlayEmotionReq: 108 已注释, 新条目 BombHitReq: 108 生效
+        assertEquals("BombHitReq", OpcodeManager.recvOps[108])
         assertNotNull(handlerArray[108], "Handler 108 must be registered")
-        assertSame(ObjectHitReq, handlerArray[108])
+        assertSame(BombHitReq, handlerArray[108])
     }
 
     @Test
@@ -41,7 +41,7 @@ class ObjectHitReqTest {
         )
         val buf = Unpooled.wrappedBuffer(raw)
 
-        with(ObjectHitReq) {
+        with(BombHitReq) {
             buf.handle(ClientSocket())
         }
 
@@ -51,7 +51,7 @@ class ObjectHitReqTest {
     @Test
     fun testShortBodyDiscarded() {
         val buf = Unpooled.wrappedBuffer(byteArrayOf(0xA7.toByte(), 0x75.toByte(), 0x5C.toByte()))
-        with(ObjectHitReq) {
+        with(BombHitReq) {
             buf.handle(ClientSocket())
         }
         assertEquals(0, buf.readableBytes(), "残包必须被跳过, 不能抛异常断线")
@@ -65,7 +65,7 @@ class ObjectHitReqTest {
             0x5A.toByte(), 0x5A.toByte()
         )
         val buf = Unpooled.wrappedBuffer(raw)
-        with(ObjectHitReq) {
+        with(BombHitReq) {
             buf.handle(ClientSocket())
         }
         assertEquals(0, buf.readableBytes(), "追加字段不得残留影响下一包解析")

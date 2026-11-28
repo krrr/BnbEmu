@@ -192,7 +192,6 @@ class BattleSession(
         val gridX: Int,
         val gridY: Int,
         val delayMs: Int,
-        val includeSender: Boolean
     )
 
     private val matchLock = Any()
@@ -491,38 +490,51 @@ class BattleSession(
 
     // ---- C→S op 108 对象命中上报 → S→C op138 SetBombState(state=0) 引爆  ----
     //
-    // 飞镖 (CGODart) 命中水泡时客户端只发 op121 (发射) + op108 (命中预告), 全函数没有
-    // sub_565E9F —— **不会本地引爆**, 必须等服务端下令:
-    //   S→C op138 0x005481BD → 0x00534B18 → 0x00534338 (按 bombId 找水泡) → 0x00565E9F 引爆。
-    // op108 的 delayMs = 飞镖飞行时间 (1200*射程px/1000 - 2*ping), 服务端按它延时广播,
-    // 让飞行动画先播完。objId 是客户端对象混淆 ID (sub_44B67A(obj+144)), 不能当 bombId,
-    // 所以只能按 gridX/gridY 在 [bombs] 里反查服务端自己的 id (即 op139 回填的那个值)。
-    // 延时上限见 [BattleConfig.dartDetonationMaxDelayMs]。
+    // 客户端两类触发均共用同一 6B 结构: E2(targetObjectId) E1(gridX) E1(gridY) E2(delayMs):
+    //   1) 飞镖 (CGODart, sub_465EC8): 客户端不会本地引爆，必须等服务端下发
+    //      S→C op138 0x005481BD → 0x00534B18 → 0x00534338 (按 bombId 找水泡) → 0x00565E9F 引爆。
+    //      delayMs = 1200*射程px/1000 - 2*ping（贴脸射出可能钳位为 0）。
+    //   2) 水泡本地早爆 (CGOBomb::Update sub_45A633 命中图钉/连锁火焰/发射泡落地邻火):
+    //      发 op108 (delayMs = 0) 后立即本地引爆 (bomb+8 置 0)，并把 bomb+240 置 1 锁住
+    //      CBombBag::AllocBomb (sub_44C056) 槽位；客户端唯一正常的解锁路径就是收到服务端回发的
+    //      S→C op138 state=0 (sub_534B18 第一步清 bomb+240，第二步见 bomb+8==0 直接 return 0 不重复引爆)。
+    //      因此无论 delayMs > 0 还是 delayMs == 0，都必须向全体客户端（含发送者本人）广播 op138 state=0！
     //
-    // · 命中格没有登记水泡 → 不处理 (op108 也可能命中箱子/角色/地面障碍)。
-    // · 找到后立刻从 bombs 移除: 既对同一颗泡的重复上报去重 (实测连发两镖会收到两条
-    //   完全相同的 op108), 也防止 onTick 2.5s 到期再广播一次引爆。
-    // · delayMs > 0 = 飞镖预告路径, 客户端没炸过 → 广播含发射者本人。
-    //   delayMs == 0 = 客户端已本地引爆的路径 (0x0046DFAD / C2S_Op108_And_Op154_Action1),
-    //   只同步其它客户端, 不给发射者重复发引爆包。
+    // 关于 targetObjectId: sub_44B67A(obj+144) 对于已确认水泡就是 op139 回填进 bomb+144 的 bombId
+    // (未确认泡为 0xFFFF)
+    // 查找策略:
+    //   1) targetObjectId != 0xFFFF 时先按 id == targetObjectId 精确匹配活跃水泡；
+    //   2) 未命中时 (例如 op 139 尚未回填前的 0xFFFF 未确认泡本地早爆), 再按 (gridX, gridY) 兜底。
+    // · 找到后立刻从 bombs 移除并取消未到点的落地激活排程 (launchedBombActivations)，
+    //   既对重复上报去重，也防止 onTick 2.5s 到期再广播一次或补发 state=1。
+    // 延时上限见 [BattleConfig.dartDetonationMaxDelayMs]。
     /**
      * @return 是否真的引爆了一颗水泡 (重复上报 / 命中格无泡都返回 false)。
      * @param broadcast false = 只改服务端状态, 供单元测试使用, 不排程广播。
      */
-    fun onObjectHit(
+    fun onBombHit(
         targetObjectId: Int,
         gridX: Int,
         gridY: Int,
         delayMs: Int,
-        sender: ClientSocket? = null,
         broadcast: Boolean = true
     ): Boolean {
         if (isDestroyed) return false
         if (gridX !in 0..12 || gridY !in 0..14) return false
 
         val bomb = synchronized(bombs) {
-            val hit = bombs.firstOrNull { it.gridX == gridX && it.gridY == gridY && it.state != 0 }
-            if (hit != null) bombs.remove(hit)
+            val byId = if (targetObjectId != 0xFFFF) {
+                bombs.firstOrNull { it.id == targetObjectId && it.state != 0 }
+            } else {
+                null
+            }
+            val hit = byId ?: bombs.firstOrNull {
+                it.gridX == gridX && it.gridY == gridY && it.state != 0
+            }
+            if (hit != null) {
+                bombs.remove(hit)
+                launchedBombActivations.remove(hit.id)?.cancel(false)
+            }
             hit
         }
         if (bomb == null) {
@@ -538,35 +550,27 @@ class BattleSession(
             return false
         }
 
-        val includeSender = delayMs > 0
         val delay = delayMs.toLong().coerceIn(0, config.dartDetonationMaxDelayMs)
         dartDetonations[bomb.id] = DartDetonation(
-            bomb.id, targetObjectId, gridX, gridY, delayMs, includeSender
+            bomb.id, targetObjectId, gridX, gridY, delayMs
         )
 
         if (debugMode) {
             Logger.debug(
                 "[BattleSession] op108 hit -> detonate bomb=${bomb.id} grid=($gridX,$gridY) " +
-                    "objId=$targetObjectId delay=${delay}ms includeSender=$includeSender"
+                    "objId=$targetObjectId delay=${delay}ms"
             )
         }
 
         if (broadcast) {
             val packet = SetBombState(bomb.id, state = 0)
-            val sendFn = {
-                if (!isDestroyed) {
-                    clientsProvider()
-                        .filter { includeSender || it !== sender }
-                        .forEach { it.ctx.writeAndFlush(packet) }
-                }
-            }
             if (delay == 0L) {
-                sendFn()
+                broadcast(packet)
             } else {
                 var scheduled: ScheduledFuture<*>? = null
                 scheduled = executor.schedule({
                     scheduled?.let { dartDetonationFutures.remove(it) }
-                    sendFn()
+                    broadcast(packet)
                 }, delay, TimeUnit.MILLISECONDS)
                 dartDetonationFutures.add(scheduled)
             }
@@ -982,7 +986,7 @@ class BattleSession(
     /**
      * 落地激活: 下发 S→C op 138 SetBombState(bombId, state=1)。
      * 幂等: 排程记录被消费掉才执行, 重复触发 (或销毁后迟到的任务) 直接跳过。
-     * @return 是否真的下发; 水泡已被提前引爆 (飞镖/钉子 [onObjectHit] 或 [onTick] 到期移除) 时跳过并返回 false。
+     * @return 是否真的下发; 水泡已被提前引爆 (飞镖/钉子 [onBombHit] 或 [onTick] 到期移除) 时跳过并返回 false。
      */
     fun activateLaunchedBomb(bombId: Int): Boolean {
         launchedBombActivations.remove(bombId) ?: return false
